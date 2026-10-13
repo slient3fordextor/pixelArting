@@ -18,6 +18,12 @@ test('native window starts its service, supports editing and protects unsaved wo
     page.on('dialog', () => {});
     const canvas = page.getByLabel('像素编辑画布');
     await expect(canvas).toBeVisible();
+    await page.keyboard.press('e');
+    await expect(page.getByRole('button', { name: '橡皮 (E)', exact: true })).toHaveClass(/active/);
+    await page.keyboard.press('b');
+    await expect(page.getByRole('button', { name: '铅笔 (B)', exact: true })).toHaveClass(/active/);
+    await desktop.evaluate(({ Menu }) => { Menu.getApplicationMenu()!.items[2].submenu!.items[1].click(); });
+    await expect(page.getByRole('button', { name: '橡皮 (E)', exact: true })).toHaveClass(/active/);
     const url = page.url();
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/?$/);
     const preferences = await desktop.evaluate(({ BrowserWindow }) => {
@@ -60,9 +66,18 @@ test('native window starts its service, supports editing and protects unsaved wo
     await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) =>
       element.getContext('2d')!.getImageData(0, 0, 1, 1).data[3]
     )).toBe(0);
+    await page.keyboard.press('b');
     const bounds = (await canvas.boundingBox())!;
     const start = { x: bounds.x + bounds.width * 5.5 / 64, y: bounds.y + bounds.height * 5.5 / 64 };
     await page.mouse.click(start.x, start.y);
+    await page.keyboard.press('Control+Z');
+    await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) =>
+      element.getContext('2d')!.getImageData(5, 5, 1, 1).data[3]
+    )).toBe(0);
+    await page.keyboard.press('Control+Shift+Z');
+    await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) =>
+      element.getContext('2d')!.getImageData(5, 5, 1, 1).data[3]
+    )).toBe(255);
     await page.getByRole('button', { name: '移动图层 (V)', exact: true }).click();
     await page.mouse.move(start.x, start.y);
     await page.mouse.down();

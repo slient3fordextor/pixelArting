@@ -144,6 +144,29 @@ test('first-phase pixel tools draw shapes, fill pixels and expose selection cont
   await expect(page.getByRole('button', { name: '移动画布 (H)', exact: true })).toBeVisible();
 });
 
+test('keyboard shortcuts switch tools and undo canvas edits', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  const canvas = page.getByLabel('像素编辑画布');
+  await expect(canvas).toBeVisible();
+  const rect = await canvas.boundingBox();
+  expect(rect).not.toBeNull();
+  const point = (x: number, y: number) => ({ x: rect!.x + rect!.width * (x + 0.5) / 64, y: rect!.y + rect!.height * (y + 0.5) / 64 });
+
+  await page.keyboard.press('e');
+  await expect(page.getByRole('button', { name: '橡皮 (E)', exact: true })).toHaveClass(/active/);
+  await page.keyboard.press('b');
+  await expect(page.getByRole('button', { name: '铅笔 (B)', exact: true })).toHaveClass(/active/);
+
+  const before = await canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data));
+  await page.mouse.click(point(2, 2).x, point(2, 2).y);
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data))).not.toEqual(before);
+  await page.keyboard.press('Control+Z');
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data))).toEqual(before);
+  await page.keyboard.press('Control+Shift+Z');
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data))).not.toEqual(before);
+});
+
 test('blank assets, image layers and context menus preserve editing protections', async ({ page, request }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/');

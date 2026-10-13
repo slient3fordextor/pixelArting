@@ -33,6 +33,10 @@ type StoredDraft = {
   updatedAt: string;
 };
 
+function isTextEditingTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement && target.matches('input, textarea, select, [contenteditable="true"]');
+}
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
@@ -501,17 +505,45 @@ export default function App() {
       if (name === 'new-asset' && projectId) setDialog('asset');
       if (name === 'open' && projectId) openUpload();
       if (name === 'save' && draft) run(saveDraft, '版本已保存');
+      if (name === 'undo') {
+        if (isTextEditingTarget(document.activeElement)) document.execCommand('undo');
+        else undoEdit();
+      }
+      if (name === 'redo') {
+        if (isTextEditingTarget(document.activeElement)) document.execCommand('redo');
+        else redoEdit();
+      }
+      if (name.startsWith('tool:')) {
+        if (isTextEditingTarget(document.activeElement)) return;
+        const next = name.slice(5) as DrawingTool;
+        if (['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'select', 'pan', 'move-layer'].includes(next)) setTool(next);
+      }
     };
     window.addEventListener('pixelart-command', command);
     return () => window.removeEventListener('pixelart-command', command);
-  }, [locked, projectId, draft, asset, frameIndex, selectedLayer]);
+  }, [locked, projectId, draft, asset, frameIndex, selectedLayer, undo, redo, selection]);
   useEffect(() => {
     const shortcuts: Record<string, DrawingTool> = { b: 'pencil', e: 'eraser', i: 'eyedropper', g: 'fill', l: 'line', r: 'rectangle', o: 'ellipse', m: 'select', h: 'pan', v: 'move-layer' };
     const handler = (event: KeyboardEvent) => {
-      if ((event.target as HTMLElement).closest('input, textarea, select')) return;
+      if (isTextEditingTarget(event.target)) return;
       const modifier = event.ctrlKey || event.metaKey;
       if (modifier && !event.altKey) {
         const command = event.key.toLowerCase();
+        if (command === 's' && !locked && draft) {
+          event.preventDefault();
+          void run(saveDraft, '版本已保存');
+          return;
+        }
+        if (command === 'n' && !locked && projectId) {
+          event.preventDefault();
+          setDialog('asset');
+          return;
+        }
+        if (command === 'o' && !locked && projectId) {
+          event.preventDefault();
+          openUpload();
+          return;
+        }
         if ((command === 'z' || command === 'y') && !locked) {
           event.preventDefault();
           if (command === 'y' || event.shiftKey) redoEdit();
