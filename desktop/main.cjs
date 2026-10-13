@@ -1,0 +1,98 @@
+const { app, BrowserWindow, dialog, Menu, screen } = require('electron');
+const { existsSync } = require('node:fs');
+const path = require('node:path');
+const { startBackend } = require('./backend.cjs');
+
+app.setName('PixelArting');
+if (process.env.PIXELART_DESKTOP_USER_DATA) app.setPath('userData', process.env.PIXELART_DESKTOP_USER_DATA);
+const root = path.resolve(__dirname, '..');
+let backend, mainWindow, closing = false;
+
+function command(name) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.executeJavaScript(`window.dispatchEvent(new CustomEvent('pixelart-command', { detail: ${JSON.stringify(name)} }))`).catch(() => {});
+  }
+}
+
+function menu() {
+  return Menu.buildFromTemplate([
+    { label: '文件', submenu: [
+      { label: '新建素材', accelerator: 'CmdOrCtrl+N', click: () => command('new-asset') },
+      { label: '导入素材', accelerator: 'CmdOrCtrl+O', click: () => command('open') },
+      { label: '保存版本', accelerator: 'CmdOrCtrl+S', click: () => command('save') },
+      { type: 'separator' }, { label: '关闭窗口', accelerator: 'Alt+F4', click: () => mainWindow?.close() },
+    ] },
+    { label: '编辑', submenu: [
+      { role: 'undo', label: '撤销文本' }, { role: 'redo', label: '重做文本' }, { type: 'separator' },
+      { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' },
+    ] },
+    { label: '窗口', submenu: [{ role: 'minimize', label: '最小化' }, { role: 'togglefullscreen', label: '全屏' }] },
+  ]);
+}
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow?.isMinimized()) mainWindow.restore();
+    mainWindow?.focus();
+  });
+
+  app.whenReady().then(async () => {
+    if (!existsSync(path.join(root, 'frontend/dist/index.html'))) throw new Error('请先运行 npm --prefix frontend run build。');
+    backend = await startBackend({ root, dataRoot: process.env.PIXELART_DATA_DIR, onExit: error => {
+      if (!closing) { dialog.showErrorBox('PixelArting 本地服务', error.message); mainWindow?.destroy(); }
+    } });
+    const area = screen.getPrimaryDisplay().workAreaSize;
+    mainWindow = new BrowserWindow({
+      title: 'PixelArting', width: Math.min(1440, area.width), height: Math.min(1000, area.height),
+      minWidth: Math.min(1000, area.width), minHeight: Math.min(740, area.height),
+      backgroundColor: '#f6f7f8', show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true },
+    });
+    Menu.setApplicationMenu(menu());
+    mainWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    mainWindow.webContents.session.setPermissionCheckHandler(() => false);
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    mainWindow.webContents.on('context-menu', (_event, params) => {
+      if (!params.isEditable) return;
+      Menu.buildFromTemplate([
+        { role: 'undo', label: '撤销' }, { role: 'redo', label: '重做' }, { type: 'separator' },
+        { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' },
+      ]).popup({ window: mainWindow });
+    });
+    mainWindow.webContents.session.on('will-download', (_event, item) => {
+      item.setSaveDialogOptions({ title: '导出素材', defaultPath: path.join(app.getPath('downloads'), item.getFilename()) });
+    });
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+      if (new URL(url).origin !== backend.url) event.preventDefault();
+    });
+    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      callback({ responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': ["default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"],
+      } });
+    });
+    mainWindow.webContents.on('will-prevent-unload', event => {
+      const result = dialog.showMessageBoxSync(mainWindow, {
+        type: 'question', title: '未保存的编辑', message: '关闭窗口并放弃未保存的编辑？',
+        buttons: ['继续编辑', '放弃并关闭'], defaultId: 0, cancelId: 0,
+      });
+      if (result === 1) event.preventDefault();
+    });
+    mainWindow.once('ready-to-show', () => mainWindow.show());
+    await mainWindow.loadURL(backend.url);
+  }).catch(async error => {
+    dialog.showErrorBox('PixelArting 启动失败', error.message);
+    closing = true;
+    await backend?.stop();
+    app.quit();
+  });
+
+  app.on('window-all-closed', async () => {
+    closing = true;
+    await backend?.stop();
+    app.quit();
+  });
+  process.on('exit', () => backend?.child.kill());
+}

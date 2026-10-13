@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=PixelArting
+Comment=Local pixel art editor
+Exec=/home/admin/PycharmProjects/pixelArting/desktop/start.sh
+Path=/home/admin/PycharmProjects/pixelArting
+Terminal=false
+Categories=Graphics;2DGraphics;
+StartupWMClass=PixelArting
