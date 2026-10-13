@@ -501,20 +501,36 @@ export default function App() {
     const command = (event: Event) => {
       const name = (event as CustomEvent<string>).detail;
       setMenu(null);
+      const textEditing = isTextEditingTarget(document.activeElement);
+      if (name === 'copy') {
+        if (textEditing) document.execCommand('copy');
+        else canvasEditorRef.current?.copySelection();
+        return;
+      }
+      if (name === 'cut') {
+        if (textEditing) document.execCommand('cut');
+        else if (!locked) canvasEditorRef.current?.cutSelection();
+        return;
+      }
+      if (name === 'paste') {
+        if (textEditing) document.execCommand('paste');
+        else if (!locked) canvasEditorRef.current?.pasteSelection();
+        return;
+      }
       if (locked) return;
       if (name === 'new-asset' && projectId) setDialog('asset');
       if (name === 'open' && projectId) openUpload();
       if (name === 'save' && draft) run(saveDraft, '版本已保存');
       if (name === 'undo') {
-        if (isTextEditingTarget(document.activeElement)) document.execCommand('undo');
+        if (textEditing) document.execCommand('undo');
         else undoEdit();
       }
       if (name === 'redo') {
-        if (isTextEditingTarget(document.activeElement)) document.execCommand('redo');
+        if (textEditing) document.execCommand('redo');
         else redoEdit();
       }
       if (name.startsWith('tool:')) {
-        if (isTextEditingTarget(document.activeElement)) return;
+        if (textEditing) return;
         const next = name.slice(5) as DrawingTool;
         if (['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'select', 'pan', 'move-layer'].includes(next)) setTool(next);
       }
@@ -564,7 +580,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [locked, selection, undo, redo, draft, frameIndex, selectedLayer]);
+  }, [locked, projectId, selection, undo, redo, draft, frameIndex, selectedLayer]);
   let menuItems: MenuItem[] = [];
   if (menu?.kind === 'library') menuItems = [
     { label: '新建素材', icon: FilePlus2, disabled: locked || !projectId, action: () => setDialog('asset') },
