@@ -92,7 +92,7 @@ class CheckConfig(Model):
     expectedIdleFrames: int = Field(default=1, ge=1, le=64)
     expectedWalkFrames: int = Field(default=4, ge=1, le=64)
     enabled: dict[str, bool] = Field(default_factory=lambda: dict.fromkeys(RULES, True))
-    exportTarget: Literal["png", "json", "godot"] = "png"
+    exportTarget: Literal["png", "frames", "sheet", "json", "godot"] = "png"
     godotVersion: Literal["4.7.2"] = "4.7.2"
 
     @model_validator(mode="after")
