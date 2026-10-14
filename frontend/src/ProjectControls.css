@@ -1,0 +1,12 @@
+.project-management-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 12px; background: #172b3140; }
+.project-management-dialog { width: min(440px, 100%); max-height: calc(100dvh - 24px); overflow: auto; padding: 20px; border: 1px solid #dce0e4; border-radius: 6px; background: #fff; box-shadow: 0 12px 36px #172b3126; }
+.project-management-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.project-management-heading h2 { margin: 0; font-size: 18px; line-height: 1.4; }
+.project-management-field { display: grid; gap: 7px; margin: 16px 0; font-size: 12px; }
+.project-management-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.project-management-danger-zone { margin-top: 20px; padding-top: 20px; border-top: 1px solid #e9dcda; }
+.project-management-danger-zone h3 { margin: 0; font-size: 14px; color: #ad4038; }
+.project-management-danger-zone p { margin: 10px 0; font-size: 12px; line-height: 1.6; color: #626974; overflow-wrap: anywhere; }
+.project-management-name { color: #30353d; white-space: pre-wrap; }
+.project-management-dialog .project-management-delete { border: 1px solid #ad4038; background: #ad4038; color: #fff; }
+.project-management-error { margin: 14px 0 0; font-size: 12px; line-height: 1.6; color: #ad4038; overflow-wrap: anywhere; }
