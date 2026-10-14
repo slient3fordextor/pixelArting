@@ -145,7 +145,9 @@ class CopyAssetRequest(Model):
 
 class CheckRequest(Model):
     versionId: str
-    config: CheckConfig = Field(default_factory=CheckConfig)
+    # A missing config uses the owning project's persisted configuration.  Keeping
+    # this optional preserves compatibility with clients that only send versionId.
+    config: CheckConfig | None = None
 
 
 class RepairAction(Model):

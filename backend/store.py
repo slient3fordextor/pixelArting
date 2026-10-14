@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .images import checksum, validate_images
-from .models import Document
+from .models import CheckConfig, Document
 
 
 def uid() -> str:
@@ -34,7 +34,15 @@ class Store:
                 CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), parent TEXT, operation TEXT NOT NULL, document TEXT NOT NULL, checksum TEXT NOT NULL, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), version_id TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS previews (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), base_version TEXT NOT NULL, document TEXT NOT NULL, checksum TEXT NOT NULL, actions TEXT NOT NULL, config TEXT NOT NULL, result_version TEXT, created TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS project_configs (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, config TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS reports_asset_created ON reports(asset_id, created DESC);
             """)
+            # Backfill defaults without changing any existing project data.
+            default_config = json.dumps(CheckConfig().model_dump(), ensure_ascii=False)
+            connection.execute(
+                "INSERT OR IGNORE INTO project_configs(project_id, config, updated) SELECT id, ?, created FROM projects",
+                (default_config,),
+            )
 
     @contextmanager
     def connection(self):
@@ -51,11 +59,50 @@ class Store:
         project = {"id": uid(), "name": name, "created": now()}
         with self.connection() as conn:
             conn.execute("INSERT INTO projects VALUES (:id,:name,:created)", project)
+            conn.execute(
+                "INSERT INTO project_configs(project_id, config, updated) VALUES (?,?,?)",
+                (project["id"], json.dumps(CheckConfig().model_dump(), ensure_ascii=False), project["created"]),
+            )
         return project
 
     def list_projects(self):
         with self.connection() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM projects ORDER BY created")]
+
+    def project_config(self, project_id: str) -> CheckConfig:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT config FROM projects p LEFT JOIN project_configs c ON c.project_id=p.id WHERE p.id=?",
+                (project_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError("项目不存在")
+            if row["config"] is not None:
+                return CheckConfig.model_validate_json(row["config"])
+            config = CheckConfig()
+            conn.execute(
+                "INSERT OR IGNORE INTO project_configs(project_id, config, updated) VALUES (?,?,?)",
+                (project_id, config.model_dump_json(), now()),
+            )
+            return config
+
+    def save_project_config(self, project_id: str, config: CheckConfig) -> CheckConfig:
+        with self.connection() as conn:
+            if not conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
+                raise KeyError("项目不存在")
+            conn.execute(
+                "INSERT INTO project_configs(project_id, config, updated) VALUES (?,?,?) "
+                "ON CONFLICT(project_id) DO UPDATE SET config=excluded.config, updated=excluded.updated",
+                (project_id, config.model_dump_json(), now()),
+            )
+        return config
+
+    def asset_config(self, asset_id: str) -> CheckConfig:
+        with self.connection() as conn:
+            row = conn.execute("SELECT project_id FROM assets WHERE id=?", (asset_id,)).fetchone()
+        if not row:
+            raise KeyError("素材不存在")
+        return self.project_config(row["project_id"])
 
     def list_assets(self, project_id: str):
         with self.connection() as conn:
@@ -190,10 +237,39 @@ class Store:
 
     def save_report(self, asset_id: str, version_id: str, body: dict):
         report_id = uid()
-        body.update(id=report_id, assetVersionId=version_id)
+        created = now()
+        body = dict(body)
+        body.update(id=report_id, assetVersionId=version_id, created=created)
         with self.connection() as conn:
-            conn.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, asset_id, version_id, json.dumps(body, ensure_ascii=False), now()))
+            if not conn.execute("SELECT id FROM versions WHERE id=? AND asset_id=?", (version_id, asset_id)).fetchone():
+                raise KeyError("素材版本不存在")
+            conn.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, asset_id, version_id, json.dumps(body, ensure_ascii=False), created))
         return body
+
+    def list_reports(self, asset_id: str, version_id: str | None = None, limit: int = 50, offset: int = 0):
+        if limit < 1 or limit > 100:
+            raise ValueError("报告数量必须在 1 到 100 之间")
+        if offset < 0:
+            raise ValueError("报告偏移量不能为负数")
+        with self.connection() as conn:
+            if not conn.execute("SELECT id FROM assets WHERE id=?", (asset_id,)).fetchone():
+                raise KeyError("素材不存在")
+            if version_id is None:
+                rows = conn.execute(
+                    "SELECT id, version_id, body, created FROM reports WHERE asset_id=? ORDER BY created DESC, rowid DESC LIMIT ? OFFSET ?",
+                    (asset_id, limit, offset),
+                )
+            else:
+                rows = conn.execute(
+                    "SELECT id, version_id, body, created FROM reports WHERE asset_id=? AND version_id=? ORDER BY created DESC, rowid DESC LIMIT ? OFFSET ?",
+                    (asset_id, version_id, limit, offset),
+                )
+            reports = []
+            for row in rows:
+                body = json.loads(row["body"])
+                body.update(id=row["id"], assetVersionId=row["version_id"], created=row["created"])
+                reports.append(body)
+            return reports
 
     def preview(self, asset_id: str, base: str, document: Document, actions: list, config: dict):
         preview_id = uid()
