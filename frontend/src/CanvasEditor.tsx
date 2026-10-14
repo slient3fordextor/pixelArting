@@ -34,6 +34,7 @@ type Props = {
   zoom: number;
   grid: boolean;
   guides?: boolean;
+  onionFrames?: Frame[];
   readonly?: boolean;
   label?: string;
   finding?: Finding | null;
@@ -106,6 +107,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     zoom,
     grid,
     guides = true,
+    onionFrames,
     readonly,
     finding,
     onChange,
@@ -115,6 +117,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     label = '像素编辑画布',
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const onionRef = useRef<HTMLCanvasElement>(null);
   const sourceRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
   const sourceFiles = useRef<Map<string, string>>(new Map());
   const decodedImages = useRef<Map<string, HTMLImageElement>>(new Map());
@@ -297,6 +300,27 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
   useEffect(() => {
     drawRef.current();
   }, [layers]);
+  useEffect(() => {
+    const context = onionRef.current?.getContext('2d');
+    if (!context) return;
+    context.clearRect(0, 0, frame.width, frame.height);
+    let cancelled = false;
+    Promise.all((onionFrames ?? []).map(async ghost => {
+      const buffer = document.createElement('canvas');
+      buffer.width = ghost.width;
+      buffer.height = ghost.height;
+      const ctx = buffer.getContext('2d')!;
+      const images = await Promise.all(layers.filter(layer => layer.visible).map(async layer => ({ layer, image: await loadImage(ghost.pixels[layer.id]) })));
+      for (const { layer, image } of images) { ctx.globalAlpha = layer.opacity / 255; ctx.drawImage(image, 0, 0); }
+      return buffer;
+    })).then(buffers => {
+      if (cancelled) return;
+      context.globalAlpha = 0.25;
+      for (const buffer of buffers) context.drawImage(buffer, 0, 0);
+      context.globalAlpha = 1;
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [frame.width, frame.height, onionFrames, layers]);
   function position(event: PointerEvent<HTMLCanvasElement>): Point {
     const rect = event.currentTarget.getBoundingClientRect();
     return [
@@ -499,6 +523,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
   }
   useEffect(() => {
     const cancelMove = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
       if (event.key === 'Escape' && drawing.current && (moveBuffer.current || selectionMoving.current)) {
         event.preventDefault();
         finish(true);
@@ -540,6 +565,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
           transform: `translate(${pan[0] * zoom}px, ${pan[1] * zoom}px)`,
         }}
       >
+        <canvas ref={onionRef} width={frame.width} height={frame.height} className="onion-overlay" aria-label="洋葱皮预览画布" />
         <canvas
           ref={canvasRef}
           width={frame.width}
@@ -655,6 +681,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
             <span>基线 {frame.baselineY}</span>
           </div>
         ) : null}
+        {guides ? frame.collisionRects.map((rect, index) => <div key={index} className="collision-region" aria-label={`碰撞框 ${index + 1}`} style={{ left: rect.x * zoom, top: rect.y * zoom, width: rect.width * zoom, height: rect.height * zoom }} />) : null}
         {region ? (
           <div
             className="finding-region"

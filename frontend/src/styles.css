@@ -74,6 +74,12 @@ small { font-size: 11px; color: #8a909a; font-weight: 400; }
 .canvas-wrap { position: relative; padding-bottom: 27px; }
 .pixel-board { position: relative; background-color: #fff; background-image: conic-gradient(#e5e8eb 25%, transparent 0 50%, #e5e8eb 0 75%, transparent 0); background-size: 16px 16px; box-shadow: 0 0 0 1px #dce0e4, 0 4px 18px #22323e0b; flex-shrink: 0; }
 .pixel-board canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; touch-action: none; cursor: crosshair; }
+.pixel-board .onion-overlay { position: absolute; inset: 0; pointer-events: none; }
+.pixel-board canvas:not(.onion-overlay) { position: relative; }
+.collision-region { position: absolute; border: 1px dashed #bb4b74; background: #bb4b7414; pointer-events: none; }
+.collision-editor { margin-top: 18px; border-top: 1px solid #e4e7eb; padding-top: 12px; }
+.collision-row { padding: 8px 0; border-bottom: 1px solid #e4e7eb; }
+.leave-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
 .pixel-board canvas.pan-cursor { cursor: grab; }
 .pixel-board canvas.pan-cursor:active { cursor: grabbing; }
 .pixel-board canvas.select-cursor { cursor: crosshair; }

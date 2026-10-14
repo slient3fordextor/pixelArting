@@ -2,6 +2,7 @@ import { expect, test, _electron as electron } from '@playwright/test';
 import { mkdtemp, readFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 test('native window starts its service, supports editing and protects unsaved work on close', async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), 'pixelart-desktop-window-'));
@@ -112,10 +113,25 @@ test('native window starts its service, supports editing and protects unsaved wo
     await expect(page.locator('.draft-badge')).toBeVisible();
     await desktop.evaluate(({ Menu }) => { Menu.getApplicationMenu()!.items[0].submenu!.items[2].click(); });
     await expect(page.locator('.toast')).toContainText('版本已保存');
+    await page.getByLabel('帧基线').fill('49');
+    await page.getByRole('button', { name: '质检', exact: true }).click();
+    await page.getByLabel('项目调色板').fill('无效颜色');
+    await desktop.evaluate(({ dialog, BrowserWindow }) => {
+      dialog.showMessageBoxSync = () => 1;
+      BrowserWindow.getAllWindows()[0].close();
+    });
+    await expect(page.getByRole('alert')).toContainText('调色板请使用 #RRGGBB');
+    expect(page.isClosed()).toBe(false);
+    await page.getByLabel('项目调色板').fill('#123456');
+    const closed = page.waitForEvent('close');
+    await desktop.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+    await closed;
     await desktop.close();
     await expect.poll(async () => {
       try { await fetch(`${backendUrl}/api/health`); return true; } catch { return false; }
     }).toBe(false);
+    const stored = JSON.parse(execFileSync(path.resolve('../.venv/bin/python'), ['-c', 'import sys,sqlite3,json; c=sqlite3.connect(sys.argv[1]); d=json.loads(c.execute("SELECT v.document FROM assets a JOIN versions v ON v.id=a.current_version WHERE a.name=?",("桌面右键改名",)).fetchone()[0]); config=json.loads(c.execute("SELECT config FROM project_configs").fetchone()[0]); print(json.dumps({"baseline":d["frames"][0]["baselineY"],"palette":config["palette"]}))', path.join(temporary, 'data/pixelart.sqlite3')], { encoding: 'utf8' }));
+    expect(stored).toEqual({ baseline: 49, palette: ['#123456'] });
   } finally {
     await desktop.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows().forEach(window => window.destroy()); }).catch(() => {});
     await desktop.close().catch(() => {});

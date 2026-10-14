@@ -9,7 +9,7 @@ protocol.registerSchemesAsPrivileged([{ scheme: DESKTOP_SCHEME, privileges: { st
 app.setName('PixelArting');
 if (process.env.PIXELART_DESKTOP_USER_DATA) app.setPath('userData', process.env.PIXELART_DESKTOP_USER_DATA);
 const root = path.resolve(__dirname, '..');
-let backend, mainWindow, closing = false;
+let backend, mainWindow, closing = false, checkingClose = false;
 
 function command(name) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -108,12 +108,19 @@ if (!app.requestSingleInstanceLock()) {
         'Content-Security-Policy': ["default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"],
       } });
     });
-    mainWindow.webContents.on('will-prevent-unload', event => {
+    mainWindow.webContents.on('will-prevent-unload', () => {
+      if (checkingClose) return;
       const result = dialog.showMessageBoxSync(mainWindow, {
-        type: 'question', title: '未保存的编辑', message: '关闭窗口并放弃未保存的编辑？',
-        buttons: ['继续编辑', '放弃并关闭'], defaultId: 0, cancelId: 0,
+        type: 'question', title: '未保存的修改', message: '素材或项目配置尚未保存',
+        buttons: ['继续编辑', '保存并关闭', '放弃并关闭'], defaultId: 0, cancelId: 0,
       });
-      if (result === 1) event.preventDefault();
+      if (result !== 1 && result !== 2) return;
+      checkingClose = true;
+      const action = result === 1 ? 'save' : 'discard';
+      mainWindow.webContents.executeJavaScript(`new Promise(resolve => window.dispatchEvent(new CustomEvent('pixelart-save-before-close', { detail: { action: ${JSON.stringify(action)}, resolve } })))`)
+        .then(allowed => { if (allowed && !mainWindow.isDestroyed()) mainWindow.destroy(); })
+        .catch(error => { if (!mainWindow.isDestroyed()) dialog.showErrorBox('保存失败', error.message); })
+        .finally(() => { checkingClose = false; });
     });
     mainWindow.once('ready-to-show', () => mainWindow.show());
     await mainWindow.loadURL(DESKTOP_URL);

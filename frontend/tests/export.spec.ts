@@ -3,12 +3,14 @@ import { readFile } from 'node:fs/promises';
 
 test('asset context-menu PNG export downloads the selected frame', async ({ page, request }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
+  const project = await (await request.post('/api/projects', { data: { name: '当前帧导出项目' } })).json();
   await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
   const canvas = page.getByLabel('像素编辑画布');
-  await expect(canvas).toBeVisible();
-  await page.getByRole('button', { name: '新建素材', exact: true }).click();
+  await page.getByRole('button', { name: '新建素材', exact: true }).first().click();
   await page.getByLabel('素材名称').fill('当前帧导出验证');
   await page.getByRole('button', { name: '创建素材', exact: true }).click();
+  await expect(canvas).toHaveAttribute('aria-busy', 'false');
   await page.getByRole('button', { name: '复制当前帧', exact: true }).click();
   await expect(page.getByRole('button', { name: '第 2 帧', exact: true })).toHaveAttribute('aria-pressed', 'true');
   const bounds = (await canvas.boundingBox())!;
