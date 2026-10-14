@@ -20,6 +20,23 @@ class AiProviderError(Exception):
     """A user-safe provider failure with no credentials in its message."""
 
 
+def contains_sensitive_string(value: Any, secret: str) -> bool:
+    pending, visited = [value], set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str):
+            if secret in item:
+                return True
+        elif isinstance(item, (dict, list, tuple)) and id(item) not in visited:
+            visited.add(id(item))
+            if isinstance(item, dict):
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            else:
+                pending.extend(item)
+    return False
+
+
 def _json_content(value: Any) -> str:
     if isinstance(value, str):
         return value

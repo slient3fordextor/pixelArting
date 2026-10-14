@@ -54,8 +54,8 @@ def client(tmp_path):
         yield value
 
 
-def configure(client):
-    response = client.put("/api/ai/config", json={"apiKey": KEY, "baseUrl": "https://provider.example/v1", "textModel": "text-test", "imageModel": "image-test"})
+def configure(client, key=KEY):
+    response = client.put("/api/ai/config", json={"apiKey": key, "baseUrl": "https://provider.example/v1", "textModel": "text-test", "imageModel": "image-test"})
     assert response.status_code == 200
     return response.json()
 
@@ -177,19 +177,21 @@ def test_failed_provider_cannot_leak_key(client):
     assert KEY not in json.dumps(task)
 
 
-def test_result_cannot_leak_key(client):
-    configure(client)
+@pytest.mark.parametrize("key", [KEY, 'sk-test"x', "sk-test\\path"])
+def test_result_cannot_leak_key(client, key):
+    configure(client, key)
 
     class LeakyProvider(DrawingProvider):
         def generate_text(self, request):
             result = drawing_result()
-            result["candidates"][0]["summary"] = KEY
+            result["candidates"][0]["summary"] = key
             return result
 
     client.app.state.ai_provider_factory = LeakyProvider
     task = wait_task(client, generate(client)["id"])
     assert task["status"] == "failed"
-    assert KEY not in json.dumps(task)
+    assert key not in json.dumps(task)
+    assert task["result"] is None
 
 
 def test_image_candidate_preserves_source_and_pixelates(client):

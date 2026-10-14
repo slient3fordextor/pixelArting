@@ -1,6 +1,5 @@
 import os
 import re
-import json
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +13,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from .ai import AiProviderError, OpenAICompatibleProvider
+from .ai import AiProviderError, OpenAICompatibleProvider, contains_sensitive_string
 from .exports import export_bundle
 from .exchange import MAX_ARCHIVE_BYTES, MAX_EXPANDED_BYTES, MAX_PROJECT_ASSETS, export_project, import_bundle, import_project
 from .images import MAX_UPLOAD_BYTES, composite, encode_image, png_bytes
@@ -113,7 +112,7 @@ def create_app(data_root: Path | None = None):
             result = generate(generation.request)
             if store.generation(generation_id).status == "cancelled":
                 return
-            if config.apiKey and config.apiKey in json.dumps(result):
+            if config.apiKey and contains_sensitive_string(result, config.apiKey):
                 raise AiProviderError("AI 服务结果包含敏感信息，已拒绝保存")
             from .ai_candidates import prepare_candidates
             result = prepare_candidates(result, generation.request, store.root, config.requestTimeoutSeconds)
