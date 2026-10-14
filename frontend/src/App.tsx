@@ -19,6 +19,7 @@ import { RepairSummary } from './RepairSummary';
 import { VersionHistory } from './VersionHistory';
 import { ExchangeControls } from './ExchangeControls';
 import { ProjectControls } from './ProjectControls';
+import { AIControls } from './AIControls';
 import { ContextMenu } from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { defaultConfig, RULE_NAMES } from './types';
@@ -906,6 +907,7 @@ export default function App() {
       <div className="brand"><Grid2X2 size={23} /><span>PixelArting</span><span className="local-badge">LOCAL</span></div>
       <div className="header-meta"><span>64 × 64</span><span>Godot 4.7.2</span></div>
       <div className="header-actions">
+        <AIControls projectId={projectId} disabled={locked || !!leaveRequest} suspended={!!leaveRequest} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} />
         <button className="button secondary" disabled={!draft || locked} onClick={() => run(saveDraft, '版本已保存')}><Save size={16} /><span>保存</span>{dirty ? <i className="dirty-dot" /> : null}</button>
         <details className="export-menu"><summary className={`button primary ${!asset || dirty || locked ? 'disabled' : ''}`}><Download size={16} />导出</summary>
           <div className="dropdown">{(['png', 'frames', 'sheet', 'json', 'godot'] as const).map(target => <button key={target} disabled={!asset || dirty || locked} onClick={() => run(async () => {
