@@ -412,7 +412,7 @@ export default function App() {
     setMenu(null);
   }
 
-  async function exportAsset(item: AssetItem, target: 'png' | 'json', frameId?: string) {
+  async function exportAsset(item: AssetItem, target: 'png' | 'frames' | 'sheet' | 'json' | 'godot', frameId?: string) {
     if (item.id === asset?.id && dirty) { setNotice({ message: '当前素材有未保存编辑，请先保存再导出', error: true }); return; }
     const selectedFrame = target === 'png' && frameId ? `&frameId=${encodeURIComponent(frameId)}` : '';
     const response = await fetch(`/api/assets/${item.id}/export?versionId=${item.currentVersionId}&target=${target}${selectedFrame}`);
@@ -848,6 +848,8 @@ export default function App() {
       null, { label: '复制素材', icon: Copy, disabled: locked, action: () => run(() => copyAsset(item)) },
       { label: '创建副本', icon: CopyPlus, disabled: locked || !projectId, action: () => run(() => duplicateAsset(item)) },
       null, { label: '导出当前帧 PNG', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'png', item.id === asset?.id ? frame?.id : undefined)) },
+      { label: '导出帧序列 PNG ZIP', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'frames')) },
+      { label: '导出 Sprite Sheet PNG ZIP', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'sheet')) },
       { label: '导出分层 PNG + JSON', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'json')) },
       { label: '查看版本', icon: History, disabled: locked, action: () => run(async () => { await switchAsset(item.id); setTab('versions'); }) },
       null, { label: '删除素材', icon: Trash2, danger: true, disabled: locked, action: () => deleteAsset(item) },
@@ -906,16 +908,17 @@ export default function App() {
       <div className="header-actions">
         <button className="button secondary" disabled={!draft || locked} onClick={() => run(saveDraft, '版本已保存')}><Save size={16} /><span>保存</span>{dirty ? <i className="dirty-dot" /> : null}</button>
         <details className="export-menu"><summary className={`button primary ${!asset || dirty || locked ? 'disabled' : ''}`}><Download size={16} />导出</summary>
-          <div className="dropdown">{(['png', 'json', 'godot'] as const).map(target => <button key={target} disabled={!asset || dirty || locked} onClick={() => run(async () => {
+          <div className="dropdown">{(['png', 'frames', 'sheet', 'json', 'godot'] as const).map(target => <button key={target} disabled={!asset || dirty || locked} onClick={() => run(async () => {
             if (!asset) return;
             if (target === 'godot' && !draft?.animations.length) { setNotice({ message: '请先在时间轴中分配动作和方向', error: true }); return; }
-            const response = await fetch(`/api/assets/${asset.id}/export?versionId=${asset.currentVersionId}&target=${target}&frameId=${frame?.id}`);
+            const frameQuery = target === 'png' && frame?.id ? `&frameId=${encodeURIComponent(frame.id)}` : '';
+            const response = await fetch(`/api/assets/${asset.id}/export?versionId=${asset.currentVersionId}&target=${target}${frameQuery}`);
             if (!response.ok) { const error = await response.json(); throw new Error(error.detail || '导出失败'); }
             const url = URL.createObjectURL(await response.blob());
             const anchor = document.createElement('a'); anchor.href = url;
             anchor.download = `pixelart.${target === 'png' ? 'png' : 'zip'}`; anchor.click();
             setTimeout(() => URL.revokeObjectURL(url), 1000);
-          })}>{target === 'png' ? '当前帧 PNG' : target === 'json' ? '分层 PNG + JSON 包' : 'Godot SpriteFrames 包'}</button>)}</div>
+          })}>{target === 'png' ? '当前帧 PNG' : target === 'frames' ? '帧序列 PNG ZIP' : target === 'sheet' ? 'Sprite Sheet PNG ZIP' : target === 'json' ? '分层 PNG + JSON 包' : 'Godot SpriteFrames 包'}</button>)}</div>
         </details>
       </div>
     </header>
@@ -996,7 +999,7 @@ export default function App() {
         <FrameMetadataEditor frame={frame} locked={locked} onChange={collisionRects => edit(document => { document.frames[frameIndex].collisionRects = collisionRects; })} />
       </div> : null}
       {tab === 'quality' ? <div className="panel-content"><fieldset className="config-fields" disabled={busy || !!leaveRequest}>
-        <div className="section-label"><span>项目检查配置</span><small>{config.targetWidth} × {config.targetHeight}</small></div><div className="property-grid"><label>宽<input aria-label="目标宽度" type="number" min={1} max={512} value={config.targetWidth} onChange={e => patchConfig({ targetWidth: Number(e.target.value) })} /></label><label>高<input aria-label="目标高度" type="number" min={1} max={512} value={config.targetHeight} onChange={e => patchConfig({ targetHeight: Number(e.target.value) })} /></label><label>颜色上限<input aria-label="颜色上限" type="number" min={1} max={256} value={config.maxColors} onChange={e => patchConfig({ maxColors: Number(e.target.value) })} /></label><label>目标基线<input aria-label="目标基线" type="number" min={0} max={config.targetHeight - 1} value={config.targetBaselineY ?? ''} placeholder="未设置" onChange={e => patchConfig({ targetBaselineY: e.target.value === '' ? null : Number(e.target.value) })} /></label><label>idle 帧数<input aria-label="预期 idle 帧数" type="number" min={1} max={64} value={config.expectedIdleFrames} onChange={e => patchConfig({ expectedIdleFrames: Number(e.target.value) })} /></label><label>walk 帧数<input aria-label="预期 walk 帧数" type="number" min={1} max={64} value={config.expectedWalkFrames} onChange={e => patchConfig({ expectedWalkFrames: Number(e.target.value) })} /></label><label>基线容差<input aria-label="基线容差" type="number" min={0} max={512} value={config.baselineTolerancePx} onChange={e => patchConfig({ baselineTolerancePx: Number(e.target.value) })} /></label><label>导出检查目标<select aria-label="导出检查目标" value={config.exportTarget} onChange={e => patchConfig({ exportTarget: e.target.value as CheckConfig['exportTarget'] })}><option value="png">PNG</option><option value="json">JSON</option><option value="godot">Godot</option></select></label></div>
+        <div className="section-label"><span>项目检查配置</span><small>{config.targetWidth} × {config.targetHeight}</small></div><div className="property-grid"><label>宽<input aria-label="目标宽度" type="number" min={1} max={512} value={config.targetWidth} onChange={e => patchConfig({ targetWidth: Number(e.target.value) })} /></label><label>高<input aria-label="目标高度" type="number" min={1} max={512} value={config.targetHeight} onChange={e => patchConfig({ targetHeight: Number(e.target.value) })} /></label><label>颜色上限<input aria-label="颜色上限" type="number" min={1} max={256} value={config.maxColors} onChange={e => patchConfig({ maxColors: Number(e.target.value) })} /></label><label>目标基线<input aria-label="目标基线" type="number" min={0} max={config.targetHeight - 1} value={config.targetBaselineY ?? ''} placeholder="未设置" onChange={e => patchConfig({ targetBaselineY: e.target.value === '' ? null : Number(e.target.value) })} /></label><label>idle 帧数<input aria-label="预期 idle 帧数" type="number" min={1} max={64} value={config.expectedIdleFrames} onChange={e => patchConfig({ expectedIdleFrames: Number(e.target.value) })} /></label><label>walk 帧数<input aria-label="预期 walk 帧数" type="number" min={1} max={64} value={config.expectedWalkFrames} onChange={e => patchConfig({ expectedWalkFrames: Number(e.target.value) })} /></label><label>基线容差<input aria-label="基线容差" type="number" min={0} max={512} value={config.baselineTolerancePx} onChange={e => patchConfig({ baselineTolerancePx: Number(e.target.value) })} /></label><label>导出检查目标<select aria-label="导出检查目标" value={config.exportTarget} onChange={e => patchConfig({ exportTarget: e.target.value as CheckConfig['exportTarget'] })}><option value="png">PNG</option><option value="frames">帧序列 PNG</option><option value="sheet">Sprite Sheet PNG</option><option value="json">分层 PNG + JSON</option><option value="godot">Godot</option></select></label></div>
         <label className="checkbox-row"><input type="checkbox" checked={config.allowSemiTransparent} onChange={e => patchConfig({ allowSemiTransparent: e.target.checked })} />允许半透明</label><label className="field-label">项目调色板<textarea aria-label="项目调色板" rows={2} value={paletteText} placeholder="#24343E, #218F83" onChange={e => { setPaletteText(e.target.value); setReport(null); }} /></label><button className="text-command" onClick={() => { const palette = paletteText.split(/[,\s]+/).filter(Boolean); if (palette.some(c => !/^#[\da-f]{6}$/i.test(c))) setNotice({ message: '调色板请使用 #RRGGBB，以逗号或空格分隔', error: true }); else { patchConfig({ palette }); setNotice({ message: '调色板已更新', error: false }); } }}>应用调色板</button>
         <div className="rule-list">{Object.entries(RULE_NAMES).map(([id, name]) => <label className="rule-row" key={id}><input type="checkbox" checked={config.enabled[id]} onChange={e => patchConfig({ enabled: { ...config.enabled, [id]: e.target.checked } })} /><span>{name}</span>{report ? <span className={`rule-state ${report.rules.find(r => r.ruleId === id)?.status}`} title={report.rules.find(r => r.ruleId === id)?.reason || ''}>{statusNames[report.rules.find(r => r.ruleId === id)?.status || '']}</span> : null}</label>)}</div>
         <button className="button secondary full" disabled={!projectId || busy || !configDirty} onClick={() => run(saveProjectConfig, '项目配置已保存')}><Save size={16} />保存项目配置</button>

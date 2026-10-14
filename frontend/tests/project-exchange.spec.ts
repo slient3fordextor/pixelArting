@@ -24,5 +24,6 @@ test('project management renames and guarded deletion; saved project backup rest
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(page.getByLabel('项目', { exact: true }).locator('option', { hasText: '管理与备份项目改名' })).toHaveCount(1);
   const projects = await (await request.get('/api/projects')).json();
-  expect(projects.some((item: { id: string }) => item.id === project.id)).toBe(false);
+  expect(projects.filter((item: { name: string }) => item.name === '管理与备份项目改名')).toHaveLength(1);
+  expect(projects.some((item: { id: string }) => item.id === project.id)).toBe(true);
 });

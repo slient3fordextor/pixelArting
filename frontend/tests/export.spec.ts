@@ -35,3 +35,34 @@ test('asset context-menu PNG export downloads the selected frame', async ({ page
   expect(actual.equals(await expected.body())).toBe(true);
   expect(actual.equals(await firstFrame.body())).toBe(false);
 });
+
+test('header export menu downloads frame sequence and sprite sheet bundles', async ({ page, request }) => {
+  const project = await (await request.post('/api/projects', { data: { name: '批量导出项目' } })).json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: '新建素材', exact: true }).first().click();
+  await page.getByLabel('素材名称').fill('批量导出验证');
+  await page.getByRole('button', { name: '创建素材', exact: true }).click();
+  await expect(page.getByLabel('像素编辑画布')).toHaveAttribute('aria-busy', 'false');
+  await page.getByRole('button', { name: '复制当前帧', exact: true }).click();
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('.toast[role="status"]')).toContainText('版本已保存');
+
+  const exportMenu = page.locator('header .export-menu');
+  await exportMenu.locator('summary').click();
+  const framesDownloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: '帧序列 PNG ZIP', exact: true }).click();
+  const framesDownload = await framesDownloadPromise;
+  expect(framesDownload.suggestedFilename()).toBe('pixelart.zip');
+
+  const sheetDownloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Sprite Sheet PNG ZIP', exact: true }).click();
+  const sheetDownload = await sheetDownloadPromise;
+  expect(sheetDownload.suggestedFilename()).toBe('pixelart.zip');
+  await exportMenu.locator('summary').click();
+
+  await page.getByRole('button', { name: '质检', exact: true }).click();
+  await expect(page.getByLabel('导出检查目标')).toHaveValue('png');
+  await expect(page.getByLabel('导出检查目标').locator('option[value="frames"]')).toHaveText('帧序列 PNG');
+  await expect(page.getByLabel('导出检查目标').locator('option[value="sheet"]')).toHaveText('Sprite Sheet PNG');
+});

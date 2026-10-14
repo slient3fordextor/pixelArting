@@ -15,7 +15,7 @@ export type CheckConfig = {
   targetWidth: number; targetHeight: number; maxColors: number; palette: string[];
   allowSemiTransparent: boolean; baselineTolerancePx: number; targetBaselineY: number | null;
   expectedIdleFrames: number; expectedWalkFrames: number; enabled: Record<string, boolean>;
-  exportTarget: 'png' | 'json' | 'godot'; godotVersion: '4.7.2';
+  exportTarget: 'png' | 'frames' | 'sheet' | 'json' | 'godot'; godotVersion: '4.7.2';
 };
 export type Finding = { id: string; ruleId: string; severity: string; frameId: string | null; message: string; region: { x: number; y: number; width: number; height: number } | null; fixIds: string[] };
 export type Report = { id?: string; assetVersionId?: string; created?: string; config?: CheckConfig; findings: Finding[]; rules: { ruleId: string; status: string; reason: string | null }[]; colorCount: number; frameCount: number };

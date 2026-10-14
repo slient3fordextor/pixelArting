@@ -157,13 +157,14 @@ export function VersionHistory({ asset, draft, selectedLayer, frameIndex, zoom, 
     }
   }
 
-  async function exportVersion(target: 'png' | 'json' | 'godot') {
+  async function exportVersion(target: 'png' | 'frames' | 'sheet' | 'json' | 'godot') {
     if (!asset || !loaded || working) return;
     setOperation('export');
     setError('');
     try {
       const frame = loaded.document.frames[viewFrameIndex];
-      const query = new URLSearchParams({ versionId: loaded.id, target, frameId: frame.id });
+      const query = new URLSearchParams({ versionId: loaded.id, target });
+      if (target === 'png') query.set('frameId', frame.id);
       const response = await fetch(`/api/assets/${asset.id}/export?${query}`);
       if (!response.ok) {
         const body = await response.json().catch(() => null);
@@ -224,7 +225,7 @@ export function VersionHistory({ asset, draft, selectedLayer, frameIndex, zoom, 
           </> : <div className="history-report-panel">
             {loaded.reports.length ? <><label className="field-label">质检报告<select aria-label="历史质检报告" value={reportIndex} onChange={event => setReportIndex(Number(event.target.value))}>{loaded.reports.map((report, index) => <option key={report.id || index} value={index}>{report.created ? new Date(report.created).toLocaleString('zh-CN') : `报告 ${index + 1}`} · {report.findings.length} 个问题</option>)}</select></label>{selectedReport ? <><div className="report-summary">版本 {selectedReport.assetVersionId?.slice(0, 7)} · {selectedReport.colorCount} 色 · {selectedReport.frameCount} 帧 · {selectedReport.findings.length} 个问题</div><div className="history-report-rules">{selectedReport.rules.map(rule => <div key={rule.ruleId}><span>{RULE_NAMES[rule.ruleId] || rule.ruleId}</span><span>{({ passed: '通过', findings: '问题', skipped: '跳过', disabled: '关闭', failed: '失败' } as Record<string, string>)[rule.status] || rule.status}</span>{rule.reason ? <small>{rule.reason}</small> : null}</div>)}</div>{selectedReport.findings.map(finding => <div className="finding-item" key={finding.id}><strong>{RULE_NAMES[finding.ruleId] || finding.ruleId}</strong><p>{finding.message}</p></div>)}</> : null}</> : <p className="empty-text">此版本暂无质检报告</p>}
           </div>}
-          <div className="history-preview-actions"><details className="export-menu"><summary className="button secondary"><Download size={16} />导出此版本</summary><div className="dropdown">{(['png', 'json', 'godot'] as const).map(target => <button key={target} disabled={working || (target === 'godot' && !document.animations.length)} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); void exportVersion(target); }}>{target === 'png' ? '历史当前帧 PNG' : target === 'json' ? '历史分层 PNG + JSON 包' : '历史 Godot SpriteFrames 包'}</button>)}</div></details><button className="button primary" disabled={busy || locked || working || loaded.id === asset?.currentVersionId} onClick={() => restoreVersion(loaded.id)}><RotateCcw size={15} />恢复此版本</button></div>
+          <div className="history-preview-actions"><details className="export-menu"><summary className="button secondary"><Download size={16} />导出此版本</summary><div className="dropdown">{(['png', 'frames', 'sheet', 'json', 'godot'] as const).map(target => <button key={target} disabled={working || (target === 'godot' && !document.animations.length)} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); void exportVersion(target); }}>{target === 'png' ? '历史当前帧 PNG' : target === 'frames' ? '历史帧序列 PNG ZIP' : target === 'sheet' ? '历史 Sprite Sheet PNG ZIP' : target === 'json' ? '历史分层 PNG + JSON 包' : '历史 Godot SpriteFrames 包'}</button>)}</div></details><button className="button primary" disabled={busy || locked || working || loaded.id === asset?.currentVersionId} onClick={() => restoreVersion(loaded.id)}><RotateCcw size={15} />恢复此版本</button></div>
         </> : null}
       </section>
     </div> : null}

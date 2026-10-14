@@ -39,6 +39,7 @@ test('saved check reports can be reopened after reloading', async ({ page, reque
   await page.reload();
   await page.getByLabel('项目', { exact: true }).selectOption(project.id);
   await page.getByRole('button', { name: '质检', exact: true }).click();
+  await expect(page.getByLabel('检查历史')).toBeVisible();
   await page.getByLabel('检查历史').selectOption(reportId);
   await expect(page.locator('.rule-state')).toHaveCount(8);
 });
