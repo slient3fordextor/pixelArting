@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, CircleStop, Download, LoaderCircle, RefreshCw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
+import { Check, CircleStop, CopyPlus, Download, LoaderCircle, RefreshCw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
 import { api } from './api';
 import type { Asset } from './types';
 
@@ -17,6 +17,8 @@ type AiConfig = {
   requestTimeoutSeconds: number;
   hasApiKey: boolean;
 };
+type AiProfile = AiConfig & { id: string; name: string };
+type AiProfilesResponse = { profiles: AiProfile[]; activeId: string };
 type Candidate = {
   id: string;
   summary?: string;
@@ -57,6 +59,10 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   const [open, setOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [config, setConfig] = useState<AiConfig | null>(null);
+  const [profiles, setProfiles] = useState<AiProfile[]>([]);
+  const [activeProfileId, setActiveProfileId] = useState('');
+  const [profileName, setProfileName] = useState('');
+  const [profileApiAvailable, setProfileApiAvailable] = useState<boolean | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [textModel, setTextModel] = useState('');
@@ -82,23 +88,37 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
 
   const candidates = task?.result?.candidates || [];
   const selectedModel = mode === 'agent_draw' ? textModel : imageModel;
+  const activeProfile = profiles.find(item => item.id === activeProfileId);
   const configChanged = !config || Boolean(baseUrl !== config.baseUrl || textModel !== config.textModel || imageModel !== config.imageModel
     || imageSize !== (config.imageSize || '1024x1024') || maxOutputTokens !== (config.maxOutputTokens || 8192)
     || tokenLimitParameter !== (config.tokenLimitParameter || 'max_tokens') || sendImageBackground !== Boolean(config.sendImageBackground) || apiKey);
+  const profileNameChanged = Boolean(profileApiAvailable && activeProfile && profileName.trim() !== activeProfile.name);
+  const settingsChanged = configChanged || profileNameChanged;
   const taskActive = Boolean(task && ['queued', 'running'].includes(task.status));
   const validNumber = (value: number, maximum: number) => Number.isInteger(value) && value >= 1 && value <= maximum;
   const canGenerate = Boolean(projectId && config?.hasApiKey && prompt.trim() && selectedModel.trim() && !working && !taskActive && !configChanged
     && validNumber(width, 512) && validNumber(height, 512) && validNumber(variations, 8) && validNumber(paletteLimit, 256));
 
+  function applyProfileFields(next: AiConfig, name = '') {
+    setConfig(next); setBaseUrl(next.baseUrl); setTextModel(next.textModel); setImageModel(next.imageModel); setImageSize(next.imageSize || '1024x1024');
+    setMaxOutputTokens(next.maxOutputTokens || 8192); setTokenLimitParameter(next.tokenLimitParameter || 'max_tokens'); setSendImageBackground(Boolean(next.sendImageBackground));
+    setProfileName(name);
+    if (!next.hasApiKey || !next.textModel || !next.imageModel) setSettingsOpen(true);
+  }
+
   useEffect(() => {
     if (!open || config) return;
     let cancelled = false;
-    api<AiConfig>('/ai/config').then(next => {
+    api<AiProfilesResponse>('/ai/profiles').then(result => {
       if (cancelled) return;
-      setConfig(next); setBaseUrl(next.baseUrl); setTextModel(next.textModel); setImageModel(next.imageModel); setImageSize(next.imageSize || '1024x1024');
-      setMaxOutputTokens(next.maxOutputTokens || 8192); setTokenLimitParameter(next.tokenLimitParameter || 'max_tokens'); setSendImageBackground(Boolean(next.sendImageBackground));
-      if (!next.hasApiKey || !next.textModel || !next.imageModel) setSettingsOpen(true);
-    }).catch(error => { if (!cancelled) setNotice({ text: error instanceof Error ? error.message : '无法读取 AI 设置', error: true }); });
+      const nextProfiles = Array.isArray(result.profiles) ? result.profiles : [];
+      const active = nextProfiles.find(item => item.id === result.activeId) || nextProfiles[0];
+      if (!active) throw new Error('AI 模型档案为空');
+      setProfileApiAvailable(true); setProfiles(nextProfiles); setActiveProfileId(active.id); applyProfileFields(active, active.name);
+    }).catch(() => api<AiConfig>('/ai/config').then(next => {
+      if (cancelled) return;
+      setProfileApiAvailable(false); setProfiles([]); setActiveProfileId(''); applyProfileFields(next);
+    }).catch(error => { if (!cancelled) setNotice({ text: error instanceof Error ? error.message : '无法读取 AI 设置', error: true }); }));
     return () => { cancelled = true; };
   }, [open, config]);
 
@@ -177,14 +197,70 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
     setApiKey(''); setOpen(false);
   }
 
+  function connectionPayload(includeKey = true) {
+    const body: Record<string, unknown> = {
+      baseUrl: baseUrl.trim(), textModel: textModel.trim(), imageModel: imageModel.trim(), imageSize: imageSize.trim(),
+      maxOutputTokens, tokenLimitParameter, sendImageBackground,
+    };
+    if (includeKey && apiKey) body.apiKey = apiKey;
+    return body;
+  }
+
+  async function activateProfile(id: string) {
+    if (working || !profileApiAvailable || id === activeProfileId) return;
+    if (settingsChanged && !window.confirm('当前模型档案有未保存修改，仍要切换吗？')) return;
+    const previous = activeProfileId;
+    setWorking(true); setNotice(null);
+    try {
+      const result = await api<{ activeId: string; profile: AiProfile }>(`/ai/profiles/${encodeURIComponent(id)}/activate`, {}, 'POST');
+      setActiveProfileId(result.activeId); setProfiles(list => list.map(item => item.id === result.profile.id ? result.profile : item));
+      applyProfileFields(result.profile, result.profile.name); setApiKey(''); setNotice({ text: `已切换到 ${result.profile.name}` });
+    } catch (error) {
+      setActiveProfileId(previous);
+      setNotice({ text: error instanceof Error ? error.message : '模型档案切换失败', error: true });
+    } finally { setWorking(false); }
+  }
+
+  async function createProfile() {
+    if (working || !profileApiAvailable || configChanged) return;
+    const requestedName = profileName.trim();
+    const name = requestedName && requestedName !== activeProfile?.name ? requestedName : `模型档案 ${profiles.length + 1}`;
+    setWorking(true); setNotice(null);
+    try {
+      const next = await api<AiProfile>('/ai/profiles', { name, ...connectionPayload() }, 'POST');
+      setProfiles(list => [...list, next]); setApiKey('');
+      const active = profiles.find(item => item.id === activeProfileId);
+      setProfileName(active?.name || '');
+      setNotice({ text: `已创建 ${next.name}，可从档案列表切换` });
+    } catch (error) { setNotice({ text: error instanceof Error ? error.message : '模型档案创建失败', error: true }); }
+    finally { setWorking(false); }
+  }
+
+  async function deleteProfile(profile: AiProfile) {
+    if (working || !profileApiAvailable || profile.id === activeProfileId || profiles.length <= 1) return;
+    if (!window.confirm(`确定删除模型档案“${profile.name}”吗？`)) return;
+    setWorking(true); setNotice(null);
+    try {
+      await api<unknown>(`/ai/profiles/${encodeURIComponent(profile.id)}`, {}, 'DELETE');
+      setProfiles(list => list.filter(item => item.id !== profile.id));
+      setNotice({ text: `已删除 ${profile.name}` });
+    } catch (error) { setNotice({ text: error instanceof Error ? error.message : '模型档案删除失败', error: true }); }
+    finally { setWorking(false); }
+  }
+
   async function saveConfig() {
     setWorking(true); setNotice(null);
     try {
-      const body: Record<string, unknown> = { baseUrl: baseUrl.trim(), textModel: textModel.trim(), imageModel: imageModel.trim(), imageSize: imageSize.trim(), maxOutputTokens, tokenLimitParameter, sendImageBackground };
-      if (apiKey) body.apiKey = apiKey;
-      const next = await api<AiConfig>('/ai/config', body, 'PUT');
-      setConfig(next); setBaseUrl(next.baseUrl); setTextModel(next.textModel); setImageModel(next.imageModel); setImageSize(next.imageSize || '1024x1024'); setApiKey('');
-      setMaxOutputTokens(next.maxOutputTokens || 8192); setTokenLimitParameter(next.tokenLimitParameter || 'max_tokens'); setSendImageBackground(Boolean(next.sendImageBackground));
+      const body = connectionPayload();
+      const next = profileApiAvailable && activeProfileId
+        ? await api<AiProfile>(`/ai/profiles/${encodeURIComponent(activeProfileId)}`, { name: profileName.trim() || '未命名模型档案', ...body }, 'PUT')
+        : await api<AiConfig>('/ai/config', body, 'PUT');
+      if (profileApiAvailable && activeProfileId) {
+        const profile = next as AiProfile;
+        setProfiles(list => list.map(item => item.id === profile.id ? profile : item));
+        applyProfileFields(profile, profile.name);
+      } else applyProfileFields(next as AiConfig);
+      setApiKey('');
       setSettingsOpen(false);
       setNotice({ text: 'AI 设置已保存' });
     } catch (error) { setNotice({ text: error instanceof Error ? error.message : 'AI 设置保存失败', error: true }); }
@@ -209,8 +285,15 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
     if (working || !config?.hasApiKey) return;
     setWorking(true); setNotice(null);
     try {
-      const next = await api<AiConfig>('/ai/config', { clearApiKey: true }, 'PUT');
-      setConfig(next); setApiKey('');
+      const next = profileApiAvailable && activeProfileId
+        ? await api<AiProfile>(`/ai/profiles/${encodeURIComponent(activeProfileId)}`, { clearApiKey: true }, 'PUT')
+        : await api<AiConfig>('/ai/config', { clearApiKey: true }, 'PUT');
+      if (profileApiAvailable && activeProfileId) {
+        const profile = next as AiProfile;
+        setProfiles(list => list.map(item => item.id === profile.id ? profile : item));
+        applyProfileFields(profile, profile.name);
+      } else applyProfileFields(next as AiConfig);
+      setApiKey('');
       setNotice({ text: '已删除保存的 API Key' });
     } catch (error) { setNotice({ text: error instanceof Error ? error.message : 'API Key 删除失败', error: true }); }
     finally { setWorking(false); }
@@ -281,6 +364,13 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
         <details className="ai-settings" open={settingsOpen} onToggle={event => setSettingsOpen(event.currentTarget.open)}>
           <summary><Settings2 size={15} />连接设置<small>{config?.hasApiKey ? '密钥已配置' : '密钥未配置'}</small></summary>
           <div className="ai-settings-fields">
+            {profileApiAvailable ? <div className="ai-profiles">
+              <label className="field-label">模型档案<select aria-label="AI 模型档案" value={activeProfileId} disabled={working || taskActive} onChange={event => void activateProfile(event.target.value)}>
+                {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}{profile.hasApiKey ? ' · 已配置' : ' · 未配置'}</option>)}
+              </select></label>
+              <div className="profile-name-tools"><label className="field-label">档案名称<input aria-label="AI 档案名称" value={profileName} disabled={working || taskActive} onChange={event => setProfileName(event.target.value)} /></label><button className="icon-button" type="button" title="新建模型档案" aria-label="新建模型档案" disabled={working || taskActive || configChanged} onClick={() => void createProfile()}><CopyPlus size={16} /></button></div>
+              {profiles.some(item => item.id !== activeProfileId) ? <div className="profile-delete-tools" aria-label="可删除的模型档案">{profiles.filter(item => item.id !== activeProfileId).map(profile => <button className="icon-button" key={profile.id} type="button" title={`删除模型档案 ${profile.name}`} aria-label={`删除模型档案 ${profile.name}`} disabled={working || taskActive} onClick={() => void deleteProfile(profile)}><Trash2 size={15} /></button>)}</div> : null}
+            </div> : null}
             <label className="field-label">OpenAI-compatible Base URL<input aria-label="AI Base URL" type="url" value={baseUrl} placeholder="https://api.openai.com/v1" onChange={event => setBaseUrl(event.target.value)} /></label>
             <label className="field-label">API Key<div className="inline-tools"><input aria-label="AI API Key" type="password" autoComplete="off" value={apiKey} placeholder={config?.hasApiKey ? '已配置，留空则保持不变' : '输入你的 API Key'} onChange={event => setApiKey(event.target.value)} /><button className="icon-button" type="button" title="删除已保存 API Key" aria-label="删除已保存 API Key" disabled={working || !config?.hasApiKey} onClick={() => void clearApiKey()}><Trash2 size={17} /></button></div></label>
             <div className="property-grid">
@@ -289,7 +379,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
             </div>
             <label className="field-label">图像服务生成尺寸<input aria-label="AI 服务图像尺寸" value={imageSize} placeholder="1024x1024" onChange={event => setImageSize(event.target.value)} /></label>
             <details className="ai-advanced"><summary>高级设置</summary><div className="property-grid"><label>输出 token 上限<input aria-label="AI 输出 token 上限" type="number" min={256} max={32768} value={maxOutputTokens} onChange={event => setMaxOutputTokens(Number(event.target.value))} /></label><label>Token 限额参数<select aria-label="AI Token 限额参数" value={tokenLimitParameter} onChange={event => setTokenLimitParameter(event.target.value as typeof tokenLimitParameter)}><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label></div><label className="checkbox-row"><input type="checkbox" checked={sendImageBackground} onChange={event => setSendImageBackground(event.target.checked)} />发送图像 background 参数</label></details>
-            <button className="button secondary" type="button" disabled={working || taskActive || !configChanged} onClick={() => void saveConfig()}><Settings2 size={15} />保存连接设置</button>
+            <button className="button secondary" type="button" disabled={working || taskActive || !settingsChanged} onClick={() => void saveConfig()}><Settings2 size={15} />保存连接设置</button>
           </div>
         </details>
         </fieldset><p className="ai-cost">将向所选服务发送描述。生成费用由服务商收取。</p>

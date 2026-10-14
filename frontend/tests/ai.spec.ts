@@ -3,7 +3,13 @@ import { expect, test } from '@playwright/test';
 const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGP4z8Dwn4GBgYGJAQoAHgQCAc8oUAAAAABJRU5ErkJggg==';
 const configured = { baseUrl: 'https://ai.example.test/v1', textModel: 'text-example', imageModel: 'image-example', imageSize: '1024x1024', requestTimeoutSeconds: 120, hasApiKey: true };
 
+async function mockLegacyProfiles(page: import('@playwright/test').Page) {
+  await page.route('**/api/ai/profiles', route => route.fulfill({ status: 404, json: { detail: 'profiles unavailable' } }));
+  await page.route('**/api/ai/profiles/**', route => route.fulfill({ status: 404, json: { detail: 'profiles unavailable' } }));
+}
+
 test('AI settings protect credentials and both modes display actual candidates', async ({ page, request }) => {
+  await mockLegacyProfiles(page);
   const generationBodies: Record<string, unknown>[] = [];
   let config = { ...configured, hasApiKey: false };
   await page.route('**/api/ai/config', async route => {
@@ -75,6 +81,7 @@ test('AI settings protect credentials and both modes display actual candidates',
 });
 
 test('AI failed tasks can retry and queued tasks can cancel on a mobile viewport', async ({ page }) => {
+  await mockLegacyProfiles(page);
   let calls = 0;
   await page.route('**/api/ai/config', route => route.fulfill({ json: configured }));
   await page.route('**/api/ai/generations*', async route => {
@@ -108,6 +115,7 @@ test('AI failed tasks can retry and queued tasks can cancel on a mobile viewport
 });
 
 test('AI polling recovers from a temporary error and candidate selection respects draft cancellation', async ({ page }) => {
+  await mockLegacyProfiles(page);
   let polls = 0;
   let selections = 0;
   await page.route('**/api/ai/config', route => route.fulfill({ json: configured }));
@@ -142,6 +150,7 @@ test('AI polling recovers from a temporary error and candidate selection respect
 });
 
 test('a delayed history response preserves new tasks and reopening refreshes old task state', async ({ page }) => {
+  await mockLegacyProfiles(page);
   let releaseHistory: () => void = () => {};
   let historyCalls = 0;
   const blockedHistory = new Promise<void>(resolve => { releaseHistory = resolve; });
@@ -175,4 +184,130 @@ test('a delayed history response preserves new tasks and reopening refreshes old
   await expect(history.locator('option[value="new-generation"]')).toContainText('失败');
   await expect(page.getByLabel('AI 生成状态')).toContainText('服务器已更新任务状态');
   await expect(page.getByAltText('最新生成候选')).toHaveCount(0);
+});
+
+function profileFixture(id: string, name: string, textModel: string, imageModel: string, hasApiKey = true) {
+  return { id, name, baseUrl: `https://${id}.example.test/v1`, textModel, imageModel, imageSize: '1024x1024', requestTimeoutSeconds: 120, maxOutputTokens: 8192, tokenLimitParameter: 'max_tokens', sendImageBackground: false, hasApiKey };
+}
+
+async function mockProfiles(page: import('@playwright/test').Page) {
+  const profiles = [profileFixture('profile-a', 'OpenAI 主档案', 'text-a', 'image-a'), profileFixture('profile-b', '本地模型', 'text-b', 'image-b')];
+  let activeId = profiles[0].id;
+  let sequence = 0;
+  await page.route('**/api/ai/profiles', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { profiles, activeId } });
+    const body = route.request().postDataJSON();
+    const next = profileFixture(`profile-new-${++sequence}`, body.name, body.textModel, body.imageModel, Boolean(body.apiKey));
+    profiles.push({ ...next, ...body, hasApiKey: Boolean(body.apiKey) });
+    delete (profiles.at(-1) as Record<string, unknown>).apiKey;
+    return route.fulfill({ json: profiles.at(-1) });
+  });
+  await page.route('**/api/ai/profiles/**', async route => {
+    const parts = new URL(route.request().url()).pathname.split('/').filter(Boolean);
+    if (parts.at(-1) === 'activate') {
+      const activated = profiles.find(item => item.id === parts.at(-2));
+      if (!activated) return route.fulfill({ status: 404, json: { detail: 'profile not found' } });
+      activeId = activated!.id;
+      return route.fulfill({ json: { activeId, profile: activated } });
+    }
+    const id = parts.at(-1)!;
+    const profile = profiles.find(item => item.id === id);
+    if (!profile) return route.fulfill({ status: 404, json: { detail: 'profile not found' } });
+    if (route.request().method() === 'DELETE') {
+      const index = profiles.findIndex(item => item.id === id);
+      profiles.splice(index, 1);
+      return route.fulfill({ json: { deleted: true, id } });
+    }
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      Object.assign(profile, body);
+      if (body.clearApiKey) profile.hasApiKey = false;
+      if (body.apiKey) profile.hasApiKey = true;
+      delete (profile as Record<string, unknown>).apiKey;
+      return route.fulfill({ json: profile });
+    }
+    return route.fulfill({ status: 405, json: { detail: 'method not allowed' } });
+  });
+  return { profiles, get activeId() { return activeId; } };
+}
+
+test('AI model profiles switch text and image model requests', async ({ page, request }) => {
+  await mockProfiles(page);
+  const generationBodies: Record<string, unknown>[] = [];
+  await page.route('**/api/ai/generations*', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: [] });
+    const body = route.request().postDataJSON(); generationBodies.push(body);
+    return route.fulfill({ json: { id: `profile-generation-${generationBodies.length}`, mode: body.mode, status: 'succeeded', request: body, result: { model: body.model, candidates: [{ id: 'candidate', image, summary: '候选' }] } } });
+  });
+  const projectResponse = await request.post('/api/projects', { data: { name: 'AI 档案切换项目' } });
+  const project = await projectResponse.json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: 'AI 生成', exact: true }).click();
+  await page.locator('.ai-settings > summary').click();
+  await expect(page.getByLabel('AI 模型档案')).toHaveValue('profile-a');
+  await page.getByLabel('AI 生成描述').fill('档案 A 的像素角色');
+  await page.getByRole('button', { name: '开始生成', exact: true }).click();
+  expect(generationBodies.at(-1)?.model).toBe('text-a');
+  await page.getByLabel('AI 模型档案').selectOption('profile-b');
+  await expect(page.getByLabel('AI 文本模型')).toHaveValue('text-b');
+  await expect(page.getByLabel('AI 图像模型')).toHaveValue('image-b');
+  await page.getByRole('button', { name: '开始生成', exact: true }).click();
+  expect(generationBodies.at(-1)?.model).toBe('text-b');
+  await page.getByRole('button', { name: '图像模型生成', exact: true }).click();
+  await page.getByRole('button', { name: '开始生成', exact: true }).click();
+  expect(generationBodies.at(-1)?.model).toBe('image-b');
+});
+
+test('AI model profiles create and delete only non-active profiles', async ({ page, request }) => {
+  await mockProfiles(page);
+  await page.route('**/api/ai/generations*', route => route.fulfill({ json: [] }));
+  page.on('dialog', dialog => dialog.accept());
+  const projectResponse = await request.post('/api/projects', { data: { name: 'AI 档案保护项目' } });
+  const project = await projectResponse.json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: 'AI 生成', exact: true }).click();
+  await page.locator('.ai-settings > summary').click();
+  await page.getByLabel('AI 档案名称').fill('备用服务');
+  await page.getByRole('button', { name: '新建模型档案' }).click();
+  await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(3);
+  await expect(page.getByRole('button', { name: '删除模型档案 本地模型' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '删除模型档案 OpenAI 主档案' })).toHaveCount(0);
+  await page.getByRole('button', { name: '删除模型档案 本地模型' }).click();
+  await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(2);
+  await page.getByLabel('AI 模型档案').selectOption({ index: 1 });
+  await expect(page.getByRole('button', { name: '删除模型档案 OpenAI 主档案' })).toBeVisible();
+});
+
+test('AI model profile API key clearing stays scoped to the active profile', async ({ page, request }) => {
+  const fixture = await mockProfiles(page);
+  await page.route('**/api/ai/generations*', route => route.fulfill({ json: [] }));
+  const projectResponse = await request.post('/api/projects', { data: { name: 'AI 档案密钥项目' } });
+  const project = await projectResponse.json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: 'AI 生成', exact: true }).click();
+  await page.locator('.ai-settings > summary').click();
+  await page.getByRole('button', { name: '删除已保存 API Key' }).click();
+  await expect(page.locator('.ai-settings')).toContainText('密钥未配置');
+  await page.getByLabel('AI 模型档案').selectOption('profile-b');
+  await expect(page.locator('.ai-settings')).toContainText('密钥已配置');
+  expect(fixture.profiles.find(profile => profile.id === 'profile-a')?.hasApiKey).toBe(false);
+  expect(fixture.profiles.find(profile => profile.id === 'profile-b')?.hasApiKey).toBe(true);
+});
+
+test('AI model profile controls remain within a mobile viewport', async ({ page, request }) => {
+  await mockProfiles(page);
+  await page.route('**/api/ai/generations*', route => route.fulfill({ json: [] }));
+  const projectResponse = await request.post('/api/projects', { data: { name: 'AI 档案移动端项目' } });
+  const project = await projectResponse.json();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: 'AI 生成', exact: true }).click();
+  await page.locator('.ai-settings > summary').click();
+  await expect(page.getByLabel('AI 模型档案')).toBeVisible();
+  expect(await page.locator('.ai-modal').evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+  expect((await page.getByRole('dialog', { name: 'AI 素材生成' }).boundingBox())!.width).toBeLessThanOrEqual(390);
 });
