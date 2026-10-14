@@ -3,6 +3,7 @@ import io
 import json
 import re
 import stat
+import struct
 import zipfile
 import zlib
 from typing import Literal
@@ -21,6 +22,8 @@ MAX_ARCHIVE_FILES = 4096
 MAX_CENTRAL_DIRECTORY_BYTES = 4 * 1024 * 1024
 MAX_PROJECT_ASSETS = 64
 MAX_PROJECT_PIXELS = 67_108_864
+_ZIP_CHUNK_BYTES = 64 * 1024
+_LOCAL_HEADER = struct.Struct("<4s5H3I2H")
 
 
 class BackupAsset(Model):
@@ -46,6 +49,80 @@ def _safe_path(name: str) -> str:
     return name
 
 
+def _member_content(data: memoryview, entry: zipfile.ZipInfo, end_offset: int, remaining: int) -> bytes:
+    offset = entry.header_offset
+    if offset < 0 or offset + _LOCAL_HEADER.size > end_offset:
+        raise ValueError("ZIP 成员头无效或重叠")
+    signature, version, flags, compression, _, _, crc, compressed, expanded, name_size, extra_size = _LOCAL_HEADER.unpack_from(data, offset)
+    if signature != b"PK\x03\x04" or flags != entry.flag_bits or compression != entry.compress_type:
+        raise ValueError("ZIP 成员头与目录记录不一致")
+    if version > 20 or compressed == 0xFFFFFFFF or expanded == 0xFFFFFFFF:
+        raise ValueError("ZIP64 成员不受支持，请使用普通 ZIP")
+    if flags & (1 | 0x20 | 0x40):
+        raise ValueError("ZIP 不接受加密或补丁文件")
+    start = offset + _LOCAL_HEADER.size + name_size + extra_size
+    end = start + entry.compress_size
+    if start > end_offset or end > end_offset:
+        raise ValueError("ZIP 成员数据无效或重叠")
+    filename = bytes(data[offset + _LOCAL_HEADER.size:offset + _LOCAL_HEADER.size + name_size]).decode("utf-8" if flags & 0x800 else "cp437")
+    if filename != entry.orig_filename:
+        raise ValueError("ZIP 成员名称与目录记录不一致")
+    expected = (entry.CRC, entry.compress_size, entry.file_size)
+    descriptor_size = 0
+    if flags & 8:
+        if any(local not in (0, actual) for local, actual in zip((crc, compressed, expanded), expected)):
+            raise ValueError("ZIP 成员头与目录记录不一致")
+        # Streaming writers put the final sizes after the compressed stream.
+        descriptor = bytes(data[end:min(end + 16, end_offset)])
+        candidates = [struct.unpack_from("<3I", descriptor)] if len(descriptor) >= 12 else []
+        if len(descriptor) >= 16 and descriptor[:4] == b"PK\x07\x08":
+            candidates.append(struct.unpack_from("<3I", descriptor, 4))
+        if expected not in candidates:
+            raise ValueError("ZIP 数据描述符与目录记录不一致")
+        descriptor_size = 16 if descriptor[:4] == b"PK\x07\x08" else 12
+    elif (crc, compressed, expanded) != expected:
+        raise ValueError("ZIP 成员头与目录记录不一致")
+    if end + descriptor_size != end_offset:
+        raise ValueError("ZIP 成员数据与下一个成员不连续")
+
+    limit = min(entry.file_size, MAX_MEMBER_BYTES, remaining)
+    if compression == zipfile.ZIP_STORED:
+        if entry.compress_size != entry.file_size or entry.file_size > limit:
+            raise ValueError("ZIP 文件大小与目录记录不一致")
+        content = bytes(data[start:end])
+        actual_crc = zlib.crc32(content)
+    else:
+        decoder = zlib.decompressobj(-zlib.MAX_WBITS)
+        content = bytearray()
+        actual_crc = 0
+        position, pending = start, b""
+        # ZipExtFile trusts file_size and silently truncates excess output. Read
+        # the raw stream instead, limiting each call to the remaining budget.
+        while position < end or pending:
+            if not pending:
+                next_position = min(position + _ZIP_CHUNK_BYTES, end)
+                pending = data[position:next_position]
+                position = next_position
+            chunk = decoder.decompress(pending, min(_ZIP_CHUNK_BYTES, limit - len(content) + 1))
+            content.extend(chunk)
+            if len(content) > limit:
+                raise ValueError("ZIP 真实解压大小超过声明或安全上限")
+            actual_crc = zlib.crc32(chunk, actual_crc)
+            pending = decoder.unconsumed_tail
+            if decoder.eof:
+                if decoder.unused_data or pending or position != end:
+                    raise ValueError("ZIP 压缩流包含多余数据")
+                break
+        if not decoder.eof:
+            raise ValueError("ZIP 压缩流未完整结束")
+        if len(content) != entry.file_size:
+            raise ValueError("ZIP 文件大小与目录记录不一致")
+        content = bytes(content)
+    if actual_crc != entry.CRC:
+        raise ValueError("ZIP 文件 CRC 校验失败")
+    return content
+
+
 def _read_archive(data: bytes) -> dict[str, bytes]:
     if len(data) > MAX_ARCHIVE_BYTES:
         raise ValueError("ZIP 文件不能超过 128 MB")
@@ -61,7 +138,12 @@ def _read_archive(data: bytes) -> dict[str, bytes]:
             entries = archive.infolist()
             if len(entries) > MAX_ARCHIVE_FILES:
                 raise ValueError("ZIP 文件数量超过上限")
+            offsets = sorted(entry.header_offset for entry in entries)
+            if len(set(offsets)) != len(offsets) or any(offset < 0 or offset >= archive.start_dir for offset in offsets):
+                raise ValueError("ZIP 成员头无效或重叠")
+            ends = dict(zip(offsets, offsets[1:] + [archive.start_dir]))
             total, names = 0, set()
+            raw = memoryview(data)
             for entry in entries:
                 name = _safe_path(entry.orig_filename[:-1] if entry.is_dir() else entry.orig_filename)
                 if name in names:
@@ -72,19 +154,16 @@ def _read_archive(data: bytes) -> dict[str, bytes]:
                     raise ValueError("ZIP 不接受链接、特殊文件或加密文件")
                 if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                     raise ValueError("ZIP 压缩方式不受支持")
-                total += entry.file_size
-                if entry.file_size > MAX_MEMBER_BYTES or total > MAX_EXPANDED_BYTES:
+                if entry.file_size > MAX_MEMBER_BYTES or entry.file_size > MAX_EXPANDED_BYTES - total:
                     raise ValueError("ZIP 解压数据超过安全上限")
                 if entry.is_dir():
                     if entry.file_size:
                         raise ValueError("ZIP 目录不能包含文件数据")
-                    continue
-                with archive.open(entry) as member:
-                    content = member.read(MAX_MEMBER_BYTES + 1)
-                if len(content) != entry.file_size or len(content) > MAX_MEMBER_BYTES:
-                    raise ValueError("ZIP 文件大小与目录记录不一致")
-                files[name] = content
-    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError, EOFError, zlib.error) as error:
+                content = _member_content(raw, entry, ends[entry.header_offset], MAX_EXPANDED_BYTES - total)
+                total += len(content)
+                if not entry.is_dir():
+                    files[name] = content
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, OSError, EOFError, UnicodeError, struct.error, zlib.error) as error:
         raise ValueError("无法读取 ZIP 文件") from error
     return files
 
