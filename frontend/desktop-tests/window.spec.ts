@@ -1,5 +1,5 @@
 import { expect, test, _electron as electron } from '@playwright/test';
-import { mkdtemp, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -25,7 +25,10 @@ test('native window starts its service, supports editing and protects unsaved wo
     await desktop.evaluate(({ Menu }) => { Menu.getApplicationMenu()!.items[2].submenu!.items[1].click(); });
     await expect(page.getByRole('button', { name: '橡皮 (E)', exact: true })).toHaveClass(/active/);
     const url = page.url();
-    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/?$/);
+    expect(url).toBe('pixelart://workbench/');
+    expect(await page.evaluate(() => location.origin)).toBe('pixelart://workbench');
+    const port = Number(await readFile(path.join(profile, 'backend-port'), 'utf8'));
+    const backendUrl = `http://127.0.0.1:${port}`;
     const preferences = await desktop.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
       return { title: window.getTitle(), ...window.webContents.getLastWebPreferences() };
@@ -111,7 +114,7 @@ test('native window starts its service, supports editing and protects unsaved wo
     await expect(page.locator('.toast')).toContainText('版本已保存');
     await desktop.close();
     await expect.poll(async () => {
-      try { await fetch(`${url}api/health`); return true; } catch { return false; }
+      try { await fetch(`${backendUrl}/api/health`); return true; } catch { return false; }
     }).toBe(false);
   } finally {
     await desktop.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows().forEach(window => window.destroy()); }).catch(() => {});

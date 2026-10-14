@@ -6,7 +6,7 @@
   "scripts": {
     "setup": "node node_modules/electron/install.js",
     "start": "electron .",
-    "test": "node --test backend.test.cjs"
+    "test": "node --test *.test.cjs"
   },
   "devDependencies": {
     "electron": "44.7.0"

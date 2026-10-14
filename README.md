@@ -64,10 +64,12 @@ npx playwright test
 桌面服务生命周期和窗口回归（需要可用的图形会话及已安装的 Electron）：
 
 ```bash
-node --test desktop/backend.test.cjs
+npm --prefix desktop test
 cd frontend
 npx playwright test --config desktop.playwright.config.ts
 ```
+
+桌面界面使用固定的 `pixelart://workbench/` 地址，重启后保留本地草稿和配置。本地服务端口记录在 Electron 用户数据目录；若端口被其它程序占用，服务会选择新的空闲端口，界面存储地址保持不变。
 
 上传 PNG 最大 8 MB，单帧最大 512×512，Sheet 最大 2048×2048，请求最大 20 MB，分层总像素数最多 8,388,608。接口文档位于 `/docs`。
 
