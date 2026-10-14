@@ -502,6 +502,11 @@ export default function App() {
     setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
   }
 
+  async function saveCurrent() {
+    if (dirty || drawingStroke) await saveDraft();
+    if (configDirty) await saveProjectConfig();
+  }
+
   function deleteAsset(item: AssetItem) {
     const warning = item.id === asset?.id && dirty ? '当前素材有未保存的编辑。' : '';
     if (!window.confirm(`${warning}删除「${item.name}」及其全部版本？此操作不可撤销。`)) return;
@@ -960,7 +965,7 @@ export default function App() {
       <div className="header-meta"><span>64 × 64</span><span>Godot 4.7.2</span></div>
       <div className="header-actions">
         <AIControls projectId={projectId} disabled={locked || !!leaveRequest} suspended={!!leaveRequest} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} />
-        <button className="button secondary" disabled={!draft || locked} onClick={() => run(saveDraft, '版本已保存')}><Save size={16} /><span>保存</span>{dirty ? <i className="dirty-dot" /> : null}</button>
+        <button className="button secondary" disabled={!draft || locked} onClick={() => run(saveCurrent, '版本已保存')}><Save size={16} /><span>保存</span>{dirty || configDirty ? <i className="dirty-dot" /> : null}</button>
         <details className="export-menu"><summary className={`button primary ${!asset || dirty || locked ? 'disabled' : ''}`}><Download size={16} />导出</summary>
           <div className="dropdown">{(['png', 'frames', 'sheet', 'json', 'godot'] as const).map(target => <button key={target} disabled={!asset || dirty || locked} onClick={() => run(async () => {
             if (!asset) return;

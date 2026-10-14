@@ -1,6 +1,6 @@
 # PixelArting
 
-面向游戏素材的独立桌面像素工作台。首期配置为 64×64、多图层、Godot 4.7.2；Electron 窗口承载 React 界面并管理本地 Python 服务，完整 AI 生成和引擎插件尚未实现。
+面向游戏素材的独立桌面像素工作台。首期配置为 64×64、多图层、Godot 4.7.2；Electron 窗口承载 React 界面并管理本地 Python 服务。AI 素材生成支持像素工具绘制和图像模型两种模式，详见 [AI 素材生成](docs/ai-generation.md)。
 
 ## 运行
 
@@ -37,6 +37,7 @@ Linux 可使用 `desktop/PixelArting.desktop` 启动；该文件包含当前工�
 - 8 条规则的启用/禁用、跳过原因与问题位置；5 个确定性修复的预览/确认。
 - 不可变版本、无变化保存不建新版本、版本冲突检查、以 previewId 为幂等键确认和历史恢复。
 - 当前帧 PNG、带分层 PNG 和 Sprite Sheet 的 JSON ZIP、Godot SpriteFrames ZIP。
+- 可选的 OpenAI-compatible AI 生成：文本模型输出受限制的像素工具命令，或图像模型返回 PNG 后本地像素化；候选确认后才导入为素材。
 
 首次进入会创建两图层的原创示例素材；示例为单图，不冒充完整四方向动画。PNG 无法自动恢复图层，初次上传建立一个原始图层，其他层可以手动添加。
 
@@ -73,6 +74,5 @@ npx playwright test --config desktop.playwright.config.ts
 
 上传 PNG 最大 8 MB，单帧最大 512×512，Sheet 最大 2048×2048，请求最大 20 MB，分层总像素数最多 8,388,608。接口文档位于 `/docs`。
 
-尚未实现：多用户隔离、队列任务/取消、AI 调用、原生 Aseprite 格式、JSON 包回导入、复杂混合模式、Sheet 边距/间距、碰撞框交互编辑、引擎插件。Godot 导入验证状态见 [实现状态](docs/implementation-status.md)。
+尚未实现：多用户隔离、原生 Aseprite 格式、JSON 包回导入、复杂混合模式、Sheet 边距/间距、碰撞框交互编辑、引擎插件。Godot 导入验证状态见 [实现状态](docs/implementation-status.md)。
 
-产品与技术文档索引见 [MVP 规格](docs/mvp-spec.md)。
