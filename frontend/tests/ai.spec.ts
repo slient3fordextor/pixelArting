@@ -25,8 +25,12 @@ test('AI settings protect credentials and both modes display actual candidates',
     const body = route.request().postDataJSON(); generationBodies.push(body);
     return route.fulfill({ json: { id: `generation-${generationBodies.length}`, projectId: body.projectId, mode: body.mode, status: 'succeeded', request: body, result: { model: body.model, candidates: [{ id: 'candidate-1', image, summary: '蓝色法师' }] } } });
   });
+  const projectResponse = await request.post('/api/projects', { data: { name: 'AI 界面测试独立项目' } });
+  expect(projectResponse.ok()).toBe(true);
+  const isolatedProject = await projectResponse.json();
   await page.goto('/');
-  await expect(page.getByLabel('像素编辑画布')).toBeVisible();
+  await page.getByLabel('项目', { exact: true }).selectOption(isolatedProject.id);
+  await expect(page.getByLabel('项目', { exact: true })).toHaveValue(isolatedProject.id);
   await page.getByRole('button', { name: 'AI 生成', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'AI 素材生成' });
   await expect(dialog).toContainText('密钥未配置');
