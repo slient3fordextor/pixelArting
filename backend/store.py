@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .images import checksum, validate_images
-from .models import CheckConfig, Document
+from .models import AiConfigUpdate, AiGeneration, AiGenerationRequest, AiProviderConfig, CheckConfig, Document
 
 
 def uid() -> str:
@@ -18,6 +18,10 @@ def now() -> str:
 
 
 class Conflict(Exception):
+    pass
+
+
+class GenerationQueueFull(Exception):
     pass
 
 
@@ -35,7 +39,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), version_id TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS previews (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), base_version TEXT NOT NULL, document TEXT NOT NULL, checksum TEXT NOT NULL, actions TEXT NOT NULL, config TEXT NOT NULL, result_version TEXT, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS project_configs (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, config TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ai_provider_config (id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ai_generations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE, mode TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ai_candidate_selections (generation_id TEXT NOT NULL REFERENCES ai_generations(id) ON DELETE CASCADE, candidate_id TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL, PRIMARY KEY(generation_id,candidate_id,project_id));
                 CREATE INDEX IF NOT EXISTS reports_asset_created ON reports(asset_id, created DESC);
+                CREATE INDEX IF NOT EXISTS ai_generations_project_created ON ai_generations(project_id, created DESC);
             """)
             # Backfill defaults without changing any existing project data.
             default_config = json.dumps(CheckConfig().model_dump(), ensure_ascii=False)
@@ -64,6 +72,137 @@ class Store:
                 (project["id"], json.dumps(CheckConfig().model_dump(), ensure_ascii=False), project["created"]),
             )
         return project
+
+    def ai_config(self) -> AiProviderConfig:
+        with self.connection() as conn:
+            row = conn.execute("SELECT config FROM ai_provider_config WHERE id=1").fetchone()
+        try:
+            return AiProviderConfig.model_validate_json(row["config"]) if row else AiProviderConfig()
+        except ValueError as error:
+            raise ValueError("AI 配置损坏，请重新保存配置") from error
+
+    @staticmethod
+    def public_ai_config(config: AiProviderConfig) -> dict:
+        return {**config.model_dump(exclude={"apiKey"}), "hasApiKey": bool(config.apiKey)}
+
+    def save_ai_config(self, update: AiConfigUpdate) -> dict:
+        current = self.ai_config()
+        fields = update.model_dump(exclude_none=True, exclude={"clearApiKey"})
+        # A blank key means "keep existing"; clearing is an explicit action.
+        if not fields.get("apiKey"):
+            fields.pop("apiKey", None)
+        if update.clearApiKey:
+            fields["apiKey"] = None
+        config = AiProviderConfig.model_validate({**current.model_dump(), **fields})
+        self.db.chmod(0o600)
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO ai_provider_config(id,config,updated) VALUES (1,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated",
+                (config.model_dump_json(), now()),
+            )
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(self.db) + suffix)
+            if sidecar.exists():
+                sidecar.chmod(0o600)
+        return self.public_ai_config(config)
+
+    def create_generation(self, request: AiGenerationRequest) -> AiGeneration:
+        generation_id, created = uid(), now()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            count = conn.execute("SELECT COUNT(*) FROM ai_generations WHERE status IN ('queued','running')").fetchone()[0]
+            if count >= 32:
+                raise GenerationQueueFull("等待中的 AI 任务过多，请稍后重试")
+            if request.projectId is not None and not conn.execute("SELECT id FROM projects WHERE id=?", (request.projectId,)).fetchone():
+                raise KeyError("项目不存在")
+            conn.execute(
+                "INSERT INTO ai_generations VALUES (?,?,?,?,?,?,?,?,?)",
+                (generation_id, request.projectId, request.mode, "queued", request.model_dump_json(), None, None, created, created),
+            )
+        return self.generation(generation_id)
+
+    def select_ai_candidate(self, generation_id: str, candidate_id: str, project_id: str, document: Document):
+        validate_images(document)
+        asset_id, version_id = uid(), uid()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            selected = conn.execute(
+                "SELECT asset_id FROM ai_candidate_selections WHERE generation_id=? AND candidate_id=? AND project_id=?",
+                (generation_id, candidate_id, project_id),
+            ).fetchone()
+            if selected:
+                if selected["asset_id"] is None:
+                    raise Conflict("已导入的候选素材已删除，请重新生成")
+                asset_id = selected["asset_id"]
+            else:
+                if not conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
+                    raise KeyError("项目不存在")
+                if not conn.execute("SELECT id FROM ai_generations WHERE id=? AND status='succeeded'", (generation_id,)).fetchone():
+                    raise Conflict("AI 任务无法导入")
+                imported = document.model_copy(deep=True)
+                imported.name = self._unique_name(conn, project_id, imported.name)
+                created = now()
+                conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project_id, imported.name, version_id, created))
+                conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "ai-import", imported.model_dump_json(), checksum(imported), created))
+                conn.execute("INSERT INTO ai_candidate_selections VALUES (?,?,?,?)", (generation_id, candidate_id, project_id, asset_id))
+        return self.asset(asset_id)
+
+    @staticmethod
+    def _generation(row) -> AiGeneration:
+        return AiGeneration(
+            id=row["id"], projectId=row["project_id"], mode=row["mode"], status=row["status"],
+            request=AiGenerationRequest.model_validate_json(row["request"]),
+            result=json.loads(row["result"]) if row["result"] is not None else None,
+            error=row["error"], created=row["created"], updated=row["updated"],
+        )
+
+    def generation(self, generation_id: str) -> AiGeneration:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
+        if not row:
+            raise KeyError("AI 生成任务不存在")
+        return self._generation(row)
+
+    def list_generations(self, project_id: str | None = None, status: str | None = None, limit: int = 50):
+        clauses, values = [], []
+        if project_id is not None:
+            clauses.append("project_id=?")
+            values.append(project_id)
+        if status is not None:
+            clauses.append("status=?")
+            values.append(status)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        with self.connection() as conn:
+            rows = conn.execute("SELECT * FROM ai_generations" + where + " ORDER BY created DESC,rowid DESC LIMIT ?", (*values, limit))
+            return [self._generation(row) for row in rows]
+
+    def update_generation(self, generation_id: str, status: str, result: dict | None = None, error: str | None = None) -> AiGeneration:
+        if status not in {"running", "succeeded", "failed", "cancelled"}:
+            raise ValueError("无效的 AI 任务状态")
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT status FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
+            if not row:
+                raise KeyError("AI 生成任务不存在")
+            allowed = {"queued": {"running", "failed", "cancelled"}, "running": {"succeeded", "failed", "cancelled"}}
+            if status not in allowed.get(row["status"], set()):
+                if row["status"] == "cancelled":
+                    return self.generation(generation_id)
+                raise Conflict("AI 任务已结束，无法改变状态")
+            conn.execute(
+                "UPDATE ai_generations SET status=?,result=?,error=?,updated=? WHERE id=?",
+                (status, json.dumps(result, ensure_ascii=False) if result is not None else None, error, now(), generation_id),
+            )
+        return self.generation(generation_id)
+
+    def recover_generations(self):
+        """A process restart cannot resume an in-flight provider request."""
+        with self.connection() as conn:
+            conn.execute(
+                "UPDATE ai_generations SET status='failed',error=?,updated=? WHERE status IN ('queued','running')",
+                ("应用已重启，任务中断；请重新生成", now()),
+            )
 
     def list_projects(self):
         with self.connection() as conn:
@@ -98,6 +237,7 @@ class Store:
                 conn.execute(f"DELETE FROM {table} WHERE asset_id IN (SELECT id FROM assets WHERE project_id=?)", (project_id,))
             conn.execute("DELETE FROM assets WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM project_configs WHERE project_id=?", (project_id,))
+            conn.execute("DELETE FROM ai_generations WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
 
     def project_config(self, project_id: str) -> CheckConfig:

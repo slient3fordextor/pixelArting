@@ -1,30 +1,57 @@
 import os
 import re
+import json
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
+from .ai import AiProviderError, OpenAICompatibleProvider
 from .exports import export_bundle
 from .exchange import MAX_ARCHIVE_BYTES, MAX_EXPANDED_BYTES, MAX_PROJECT_ASSETS, export_project, import_bundle, import_project
 from .images import MAX_UPLOAD_BYTES, composite, encode_image, png_bytes
 from .imports import SheetLayout, imported_document, preview_import, retain_png
-from .models import BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
+from .models import AiCandidateSelect, AiConfigUpdate, AiGenerationRequest, BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
 from .quality import inspect
 from .repairs import repair
 from .sample import sample_document
-from .store import Conflict, Store, uid
+from .store import Conflict, GenerationQueueFull, Store, uid
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def create_app(data_root: Path | None = None):
     store = Store(data_root or Path(os.environ.get("PIXELART_DATA_DIR", ROOT / "data")))
-    app = FastAPI(title="PixelArting", version="0.1.0")
+    executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pixelart-ai")
+
+    @asynccontextmanager
+    async def lifespan(application):
+        store.recover_generations()
+        yield
+        executor.shutdown(wait=True, cancel_futures=True)
+
+    app = FastAPI(title="PixelArting", version="0.1.0", lifespan=lifespan)
     app.state.store = store
+    app.state.ai_provider_factory = OpenAICompatibleProvider
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        if request.url.path == "/api/ai/config":
+            # FastAPI's default validation output contains the rejected input,
+            # which must never include an API key.
+            return JSONResponse({"detail": [
+                {"loc": item["loc"], "msg": item["msg"], "type": item["type"]}
+                for item in error.errors()
+            ]}, status_code=422)
+        return await request_validation_exception_handler(request, error)
 
     @app.middleware("http")
     async def limit_request(request: Request, call_next):
@@ -67,6 +94,110 @@ def create_app(data_root: Path | None = None):
     @app.get("/api/health")
     def health():
         return {"status": "ok", "mode": "local-single-user", "targetSize": [64, 64], "godotVersion": "4.7.2", "schemaVersion": "1.1"}
+
+    @app.get("/api/ai/config")
+    def ai_config():
+        return store.public_ai_config(store.ai_config())
+
+    @app.put("/api/ai/config")
+    def update_ai_config(body: AiConfigUpdate):
+        return store.save_ai_config(body)
+
+    def run_generation(generation_id: str, config):
+        try:
+            generation = store.update_generation(generation_id, "running")
+            if generation.status == "cancelled":
+                return
+            provider = app.state.ai_provider_factory(config)
+            generate = provider.generate_text if generation.mode == "agent_draw" else provider.generate_image
+            result = generate(generation.request)
+            if store.generation(generation_id).status == "cancelled":
+                return
+            if config.apiKey and config.apiKey in json.dumps(result):
+                raise AiProviderError("AI 服务结果包含敏感信息，已拒绝保存")
+            from .ai_candidates import prepare_candidates
+            result = prepare_candidates(result, generation.request, store.root, config.requestTimeoutSeconds)
+            store.update_generation(generation_id, "succeeded", result=result)
+        except AiProviderError as error:
+            detail = str(error)
+            if config.apiKey and config.apiKey in detail:
+                detail = "AI 服务请求失败，请检查配置后重试"
+            try:
+                store.update_generation(generation_id, "failed", error=detail)
+            except (KeyError, Conflict):
+                pass
+        except KeyError:
+            # Deleting a project also deletes its pending generation records.
+            return
+        except Exception:
+            # Unexpected adapter errors must never expose credentials or raw
+            # provider response bodies through the stored task error.
+            try:
+                store.update_generation(generation_id, "failed", error="AI 生成失败，请检查配置后重试")
+            except (KeyError, Conflict):
+                pass
+
+    @app.post("/api/ai/generations", status_code=202)
+    def create_ai_generation(body: AiGenerationRequest):
+        config = store.ai_config()
+        if not config.apiKey:
+            raise HTTPException(409, "尚未配置 AI API Key，请在 AI 设置中填写")
+        try:
+            generation = store.create_generation(body)
+        except GenerationQueueFull as error:
+            raise HTTPException(429, str(error)) from error
+        executor.submit(run_generation, generation.id, config)
+        return generation
+
+    @app.get("/api/ai/generations")
+    def ai_generations(projectId: str | None = None, status: Literal["queued", "running", "succeeded", "failed", "cancelled"] | None = None, limit: int = Query(default=50, ge=1, le=100)):
+        return store.list_generations(projectId, status, limit)
+
+    @app.get("/api/ai/generations/{generation_id}")
+    def ai_generation(generation_id: str):
+        return store.generation(generation_id)
+
+    @app.post("/api/ai/generations/{generation_id}/cancel")
+    def cancel_ai_generation(generation_id: str):
+        return store.update_generation(generation_id, "cancelled")
+
+    @app.post("/api/ai/generations/{generation_id}/retry", status_code=202)
+    def retry_ai_generation(generation_id: str):
+        generation = store.generation(generation_id)
+        if generation.status in {"queued", "running"}:
+            raise Conflict("任务仍在执行，无法重试")
+        return create_ai_generation(generation.request)
+
+    @app.get("/api/ai/generations/{generation_id}/candidates/{candidate_id}/source")
+    def ai_candidate_source(generation_id: str, candidate_id: str):
+        generation = store.generation(generation_id)
+        candidates = (generation.result or {}).get("candidates", [])
+        candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
+        original_ref = (candidate or {}).get("source", {}).get("originalRef", "")
+        if not re.fullmatch(r"sources/[0-9a-f]{64}\.png", original_ref):
+            raise KeyError("候选原图不存在")
+        source = store.root / original_ref
+        if not source.is_file():
+            raise KeyError("候选原图不存在")
+        return Response(source.read_bytes(), media_type="image/png")
+
+    @app.post("/api/ai/generations/{generation_id}/select", status_code=201)
+    def select_ai_candidate(generation_id: str, body: AiCandidateSelect):
+        generation = store.generation(generation_id)
+        if generation.status != "succeeded" or generation.result is None:
+            raise Conflict("AI 任务尚未成功，无法导入候选")
+        project_id = body.projectId or generation.projectId
+        if not project_id:
+            raise HTTPException(422, "导入候选需要选择项目")
+        candidates = generation.result.get("candidates", [])
+        candidate = next((item for item in candidates if item.get("id") == body.candidateId), None)
+        if candidate is None:
+            raise KeyError("AI 候选不存在")
+        document = Document.model_validate(candidate["document"])
+        if body.name:
+            document.name = body.name
+        document.provenance.update({"kind": "ai", "mode": generation.mode, "generationId": generation.id, "candidateId": body.candidateId, "model": generation.result.get("model"), "prompt": generation.request.prompt})
+        return {"asset": store.select_ai_candidate(generation.id, body.candidateId, project_id, document)}
 
     @app.get("/api/projects")
     def projects():

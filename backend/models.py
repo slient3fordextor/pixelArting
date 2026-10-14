@@ -1,4 +1,5 @@
-from typing import Literal
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -110,6 +111,166 @@ class CheckConfig(Model):
         if self.targetBaselineY is not None and self.targetBaselineY >= self.targetHeight:
             raise ValueError("目标基线必须在画布内")
         return self
+
+
+class AiProviderConfig(Model):
+    """User-supplied OpenAI-compatible provider settings.
+
+    ``apiKey`` is an internal field and is never serialized by an API response.
+    Keeping it in a separate model makes accidental echoing harder to do.
+    """
+
+    baseUrl: str = Field(default="https://api.openai.com/v1", min_length=1, max_length=500)
+    apiKey: str | None = Field(default=None, max_length=4096, repr=False)
+    textModel: str = Field(default="gpt-4o-mini", min_length=1, max_length=200)
+    imageModel: str = Field(default="gpt-image-1", min_length=1, max_length=200)
+    imageSize: str = Field(default="1024x1024", min_length=1, max_length=40)
+    requestTimeoutSeconds: int = Field(default=60, ge=1, le=300)
+    maxOutputTokens: int = Field(default=8192, ge=256, le=32768)
+    tokenLimitParameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    sendImageBackground: bool = False
+
+    @field_validator("baseUrl", mode="before")
+    @classmethod
+    def validate_base_url(cls, value):
+        if not isinstance(value, str):
+            raise ValueError("AI 服务地址必须是 HTTP(S) URL")
+        value = value.strip().rstrip("/")
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment or parsed.username or parsed.password:
+            raise ValueError("AI 服务地址必须是无查询参数的 HTTP(S) URL")
+        return value
+
+    @field_validator("apiKey", mode="before")
+    @classmethod
+    def normalize_api_key(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("API Key 必须是字符串")
+        value = value.strip()
+        if any(ord(character) < 32 for character in value):
+            raise ValueError("API Key 不能包含控制字符")
+        return value or None
+
+    @field_validator("textModel", "imageModel", mode="before")
+    @classmethod
+    def normalize_model_name(cls, value):
+        if not isinstance(value, str):
+            raise ValueError("模型名称必须是字符串")
+        return value.strip()
+
+    @field_validator("imageSize", mode="before")
+    @classmethod
+    def validate_image_size(cls, value):
+        import re
+
+        if value == "auto":
+            return value
+        if not isinstance(value, str) or not re.fullmatch(r"[1-9][0-9]{0,3}x[1-9][0-9]{0,3}", value):
+            raise ValueError("图像生成尺寸必须是 auto 或 宽x高")
+        width, height = (int(part) for part in value.split("x"))
+        if width > 2048 or height > 2048 or width * height > 4_194_304:
+            raise ValueError("图像生成尺寸不能超过 2048x2048")
+        return value
+
+
+class AiConfigUpdate(Model):
+    baseUrl: str | None = Field(default=None, min_length=1, max_length=500)
+    apiKey: str | None = Field(default=None, max_length=4096, repr=False)
+    textModel: str | None = Field(default=None, min_length=1, max_length=200)
+    imageModel: str | None = Field(default=None, min_length=1, max_length=200)
+    imageSize: str | None = Field(default=None, min_length=1, max_length=40)
+    requestTimeoutSeconds: int | None = Field(default=None, ge=1, le=300)
+    maxOutputTokens: int | None = Field(default=None, ge=256, le=32768)
+    tokenLimitParameter: Literal["max_tokens", "max_completion_tokens"] | None = None
+    sendImageBackground: bool | None = None
+    clearApiKey: bool = False
+
+    @field_validator("baseUrl", mode="before")
+    @classmethod
+    def validate_optional_base_url(cls, value):
+        if value is None:
+            return value
+        return AiProviderConfig.validate_base_url(value)
+
+    @field_validator("apiKey", mode="before")
+    @classmethod
+    def normalize_optional_api_key(cls, value):
+        return AiProviderConfig.normalize_api_key(value)
+
+    @field_validator("textModel", "imageModel", mode="before")
+    @classmethod
+    def normalize_optional_model_name(cls, value):
+        if value is None:
+            return value
+        return AiProviderConfig.normalize_model_name(value)
+
+    @field_validator("imageSize", mode="before")
+    @classmethod
+    def validate_optional_image_size(cls, value):
+        return None if value is None else AiProviderConfig.validate_image_size(value)
+
+
+class AiGenerationRequest(Model):
+    projectId: str | None = None
+    mode: Literal["agent_draw", "image_model"]
+    prompt: str = Field(min_length=1, max_length=10000)
+    width: int = Field(default=64, ge=1, le=512)
+    height: int = Field(default=64, ge=1, le=512)
+    variations: int = Field(default=1, ge=1, le=8)
+    paletteLimit: int = Field(default=32, ge=1, le=256)
+    transparentBackground: bool = True
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def trim_prompt(cls, value):
+        if not isinstance(value, str):
+            raise ValueError("生成描述必须是字符串")
+        return value.strip()
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def trim_model(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            raise ValueError("模型名称必须是字符串")
+        return value.strip()
+
+
+class DrawingCommand(Model):
+    tool: Literal[
+        "create_canvas", "create_layer", "set_palette", "draw_rect", "draw_line", "fill_region",
+        "set_pixel_batch", "copy_frame", "mirror_frame", "set_collision_rect",
+        "set_origin", "run_quality_check",
+    ]
+    args: dict[str, Any] = Field(default_factory=dict, max_length=32)
+
+
+class AiGenerationCandidate(Model):
+    id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    summary: str = Field(default="", max_length=1000)
+    commands: list[DrawingCommand] = Field(default_factory=list, max_length=500)
+
+
+class AiGeneration(Model):
+    id: str
+    projectId: str | None = None
+    mode: Literal["agent_draw", "image_model"]
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    request: AiGenerationRequest
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    created: str
+    updated: str
+
+
+class AiCandidateSelect(Model):
+    candidateId: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    projectId: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class SaveRequest(Model):
