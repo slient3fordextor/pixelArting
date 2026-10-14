@@ -17,6 +17,8 @@ import { SpriteSheetImport } from './SpriteSheetImport';
 import { RepairControls } from './RepairControls';
 import { RepairSummary } from './RepairSummary';
 import { VersionHistory } from './VersionHistory';
+import { ExchangeControls } from './ExchangeControls';
+import { ProjectControls } from './ProjectControls';
 import { ContextMenu } from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { defaultConfig, RULE_NAMES } from './types';
@@ -630,6 +632,7 @@ export default function App() {
   }
 
   const frame = draft?.frames[frameIndex];
+  const currentProject = projects.find(project => project.id === projectId) || null;
   const previewChange = preview?.changes.find(change => change.frameId === frame?.id);
   const activeLayer = draft?.layers.find(layer => layer.id === selectedLayer);
   const currentAnimation = draft?.animations.find(a => a.action === action && a.direction === direction);
@@ -918,9 +921,12 @@ export default function App() {
     </header>
 
     <aside className="library" onContextMenu={event => context(event, { kind: 'library' })}>
-      <div className="section-label"><span>项目</span><IconButton icon={Plus} label="新建项目" disabled={locked} onClick={() => setDialog('project')} /></div>
+      <div className="section-label"><span>项目</span><div className="inline-tools"><IconButton icon={Plus} label="新建项目" disabled={locked} onClick={() => setDialog('project')} /><ProjectControls project={currentProject} busy={busy} beforeDelete={confirmDiscardCurrentDraft} onBusyChange={setBusy} onUpdated={async updated => { setProjects(list => list.map(item => item.id === updated.id ? updated : item)); }} onDeleted={async () => {
+        const list = await api<Project[]>('/projects'); setProjects(list);
+        if (list.length) await switchProject(list[0].id); else { setProjectId(''); setAsset(null); setDraft(null); }
+      }} /></div></div>
       <label className="project-picker"><Folder size={16} /><select aria-label="项目" value={projectId} disabled={locked} onChange={event => run(() => switchProject(event.target.value))}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-      <div className="section-label assets-label"><span>素材 <small>{assets.length}</small></span><div className="inline-tools"><IconButton icon={FilePlus2} label="新建素材" disabled={locked || !projectId} onClick={() => setDialog('asset')} /><IconButton icon={Upload} label="上传 PNG 或 Sprite Sheet" disabled={locked || !projectId} onClick={openUpload} /></div></div>
+      <div className="section-label assets-label"><span>素材 <small>{assets.length}</small></span><div className="inline-tools"><IconButton icon={FilePlus2} label="新建素材" disabled={locked || !projectId} onClick={() => setDialog('asset')} /><IconButton icon={Upload} label="上传 PNG 或 Sprite Sheet" disabled={locked || !projectId} onClick={openUpload} /><ExchangeControls projectId={projectId} busy={busy} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} onProjectImported={async imported => { setProjects(list => [...list, imported]); await switchProject(imported.id); }} /></div></div>
       <div className="asset-list">{assets.map(item => <div key={item.id} className={`asset-row ${item.id === asset?.id ? 'selected' : ''} ${renamingAssetId === item.id ? 'renaming' : ''}`} onContextMenu={event => { event.stopPropagation(); context(event, { kind: 'asset', assetId: item.id }); }}>
         <div role="button" tabIndex={locked ? -1 : 0} aria-disabled={locked} aria-label={`${item.name}预览`} className="asset-item" onClick={() => { if (!locked) run(() => switchAsset(item.id)); }} onKeyDown={event => { if (!locked && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); run(() => switchAsset(item.id)); } }}>
           <div className="asset-thumbnail">{item.id === asset?.id && frame && draft ? <Miniature frame={frame} layers={draft.layers} /> : <img src={`/api/assets/${item.id}/thumbnail?versionId=${item.currentVersionId}`} alt={`${item.name}预览`} loading="lazy" />}</div>
