@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -63,6 +63,14 @@ def create_app(data_root: Path | None = None):
     @app.post("/api/projects", status_code=201)
     def project(body: ProjectCreate):
         return store.project(body.name)
+
+    @app.get("/api/projects/{project_id}/check-config")
+    def project_config(project_id: str):
+        return store.project_config(project_id)
+
+    @app.put("/api/projects/{project_id}/check-config")
+    def save_project_config(project_id: str, body: CheckConfig):
+        return store.save_project_config(project_id, body)
 
     @app.post("/api/demo")
     def demo():
@@ -160,19 +168,25 @@ def create_app(data_root: Path | None = None):
     @app.post("/api/assets/{asset_id}/check")
     def check(asset_id: str, body: CheckRequest):
         document = store.document(asset_id, body.versionId)
-        return store.save_report(asset_id, body.versionId, inspect(document, body.config))
+        config = body.config or store.asset_config(asset_id)
+        return store.save_report(asset_id, body.versionId, inspect(document, config))
+
+    @app.get("/api/assets/{asset_id}/reports")
+    def reports(asset_id: str, versionId: str | None = None, limit: int = Query(default=50, ge=1, le=100), offset: int = Query(default=0, ge=0)):
+        return store.list_reports(asset_id, versionId, limit, offset)
 
     @app.post("/api/assets/{asset_id}/preview")
     def preview(asset_id: str, body: PreviewRequest):
         document = store.document(asset_id, body.versionId)
-        result = repair(document, body.config, body.actions)
-        preview_id = store.preview(asset_id, body.versionId, result, [a.model_dump() for a in body.actions], body.config.model_dump())
+        config = body.config or store.asset_config(asset_id)
+        result = repair(document, config, body.actions)
+        preview_id = store.preview(asset_id, body.versionId, result, [a.model_dump() for a in body.actions], config.model_dump())
         changes = []
         for old, new in zip(document.frames, result.frames):
             before, after = np.array(composite(document, old)), np.array(composite(result, new))
             changed = int(np.any(before != after, axis=2).sum()) if before.shape == after.shape else None
             changes.append({"frameId": old.id, "changedPixels": changed, "before": [old.width, old.height], "after": [new.width, new.height]})
-        return {"previewId": preview_id, "document": result, "changes": changes, "report": inspect(result, body.config)}
+        return {"previewId": preview_id, "document": result, "changes": changes, "report": inspect(result, config)}
 
     @app.post("/api/assets/{asset_id}/commit")
     def commit(asset_id: str, body: CommitRequest):

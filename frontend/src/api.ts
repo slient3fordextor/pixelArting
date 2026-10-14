@@ -1,4 +1,4 @@
-export async function api<T>(path: string, body?: unknown, method: 'POST' | 'DELETE' = 'POST'): Promise<T> {
+export async function api<T>(path: string, body?: unknown, method: 'POST' | 'DELETE' | 'PUT' = 'POST'): Promise<T> {
   const response = await fetch(`/api${path}`, body === undefined ? undefined : {
     method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
