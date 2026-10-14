@@ -234,7 +234,7 @@ async function mockProfiles(page: import('@playwright/test').Page) {
 
 async function selectProfile(page: import('@playwright/test').Page, profileName: string) {
   await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
-  await page.getByRole('option', { name: new RegExp(`^${profileName}`) }).click();
+  await page.locator('[role="listbox"] [role="option"]', { hasText: profileName }).click();
 }
 
 test('AI model profiles switch text and image model requests', async ({ page, request }) => {
@@ -278,7 +278,7 @@ test('AI model profiles create and delete the current profile', async ({ page, r
   await page.getByLabel('AI 档案名称').fill('备用服务');
   await page.getByRole('button', { name: '新建模型档案' }).click();
   await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
-  await expect(page.getByRole('option')).toHaveCount(3);
+  await expect(page.locator('[role="listbox"] [role="option"]')).toHaveCount(3);
   await page.keyboard.press('Escape');
   const deleteCurrent = page.getByRole('button', { name: '删除当前模型档案“OpenAI 主档案”' });
   await expect(deleteCurrent).toBeVisible();
@@ -286,13 +286,13 @@ test('AI model profiles create and delete the current profile', async ({ page, r
   await deleteCurrent.click();
   await expect(page.getByRole('combobox', { name: 'AI 模型档案' })).toContainText('本地模型');
   await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
-  await expect(page.getByRole('option')).toHaveCount(2);
+  await expect(page.locator('[role="listbox"] [role="option"]')).toHaveCount(2);
   await page.keyboard.press('Escape');
   const deleteSecond = page.getByRole('button', { name: '删除当前模型档案“本地模型”' });
   await expect(deleteSecond).toBeEnabled();
   await deleteSecond.click();
   await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
-  await expect(page.getByRole('option')).toHaveCount(1);
+  await expect(page.locator('[role="listbox"] [role="option"]')).toHaveCount(1);
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toBeDisabled();
   await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toHaveAttribute('title', '至少保留一个模型档案，当前档案不可删除');

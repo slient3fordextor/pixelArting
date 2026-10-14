@@ -239,6 +239,7 @@ select.full { margin-bottom: 10px; }
 .ai-profiles::after { inset: 0; opacity: .54; background: radial-gradient(circle at 87% 17%, rgba(255, 255, 255, .95) 0 1px, transparent 1.5px), radial-gradient(circle at 74% 31%, rgba(255, 255, 255, .8) 0 1px, transparent 1.5px), radial-gradient(circle at 94% 57%, rgba(117, 196, 186, .65) 0 1px, transparent 1.4px), radial-gradient(circle at 59% 14%, rgba(156, 132, 221, .5) 0 1px, transparent 1.4px); }
 .ai-profiles > * { position: relative; z-index: 1; }
 .ai-profiles .field-label { margin: 0; color: #466861; gap: 6px; }
+.profile-field-label { position: relative; z-index: 2 !important; }
 .profile-stars { position: absolute !important; top: 10px; right: 13px; display: inline-flex; align-items: center; gap: 4px; color: rgba(89, 163, 153, .72); font-size: 10px; letter-spacing: 2px; text-shadow: 0 0 9px rgba(110, 202, 190, .8); }
 .profile-stars svg { color: #6aaea4; filter: drop-shadow(0 0 4px rgba(93, 201, 184, .75)); }
 .profile-select-shell { position: relative; display: block; min-width: 0; }
@@ -272,10 +273,12 @@ select.full { margin-bottom: 10px; }
 .profile-name-input:focus-visible { border-color: #218f83 !important; outline: 2px solid rgba(33, 143, 131, .72); outline-offset: 2px; box-shadow: 0 0 0 4px rgba(33, 143, 131, .18), 0 0 22px rgba(84, 191, 174, .3); }
 .profile-add-button { width: 38px; height: 38px; margin-bottom: 0; border: 1px solid rgba(112, 193, 177, .54); border-radius: 13px; background: rgba(235, 255, 249, .58); color: #218f83; box-shadow: inset 0 1px rgba(255, 255, 255, .9), 0 5px 14px rgba(39, 121, 109, .08); transition: border-color .18s ease, background-color .18s ease, color .18s ease, box-shadow .18s ease, transform .18s ease; }
 .profile-add-button:not(:disabled):hover { border-color: rgba(50, 157, 143, .78); background: rgba(219, 248, 240, .8); color: #176f65; box-shadow: 0 0 17px rgba(84, 191, 174, .22); transform: translateY(-1px); }
-.profile-delete-tools { display: flex; align-items: center; gap: 8px; min-width: 0; padding-top: 1px; }
+.profile-delete-tools { position: relative; z-index: 0 !important; display: flex; align-items: center; gap: 8px; min-width: 0; padding-top: 1px; }
+.ai-profiles:has(.profile-menu) .profile-delete-tools { pointer-events: none; }
 .profile-delete-button { width: 32px; height: 32px; border: 1px solid rgba(189, 112, 104, .5); border-radius: 11px; background: rgba(255, 246, 244, .62); color: #a95b4f; box-shadow: inset 0 1px rgba(255, 255, 255, .78); }
 .profile-delete-button:not(:disabled):hover { border-color: rgba(180, 76, 66, .78); background: rgba(252, 228, 224, .88); color: #95483f; box-shadow: 0 0 16px rgba(194, 96, 86, .18); }
 .profile-delete-hint { min-width: 0; overflow-wrap: anywhere; color: #738780; font-size: 10px; line-height: 1.35; }
+.profile-delete-hint { pointer-events: none; }
 .ai-actions { display: flex; gap: 8px; margin-top: 15px; }
 .ai-task { margin-top: 16px; border-top: 1px solid #e4e9e8; padding-top: 13px; }
 .ai-task > div:first-child { display: flex; align-items: center; gap: 9px; }
