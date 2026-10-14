@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronRight, ClipboardPaste, Copy, CopyPlus, Download, Eraser, Eye, EyeOff,
   FilePlus2, Folder, Grid2X2, Hand, History, ImagePlus, Layers, Lock, Minus, Move, PaintBucket, Pause, Pencil, Pipette, Play, Plus, Redo2,
@@ -55,6 +56,10 @@ export default function App() {
   const [guides, setGuides] = useState(true);
   const [onion, setOnion] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [drawingStroke, setDrawingStroke] = useState(false);
+  const finishingStroke = useRef(false);
+  const latestDirty = useRef(false);
+  const [conflictingDraft, setConflictingDraft] = useState<StoredDraft | null>(null);
   const [undo, setUndo] = useState<Document[]>([]);
   const [redo, setRedo] = useState<Document[]>([]);
   const [config, setConfig] = useState<CheckConfig>(() => structuredClone(defaultConfig));
@@ -100,6 +105,7 @@ export default function App() {
     || JSON.stringify(paletteText.split(/[,\s]+/).filter(Boolean)) !== JSON.stringify(config.palette);
 
   latestDraft.current = draft;
+  latestDirty.current = dirty;
   latestAsset.current = asset;
   latestFrameIndex.current = frameIndex;
   latestSelectedLayer.current = selectedLayer;
@@ -152,7 +158,8 @@ export default function App() {
   }
 
   async function confirmDiscardCurrentDraft(_message?: string) {
-    if (!dirty && !configDirty) return true;
+    completeStroke();
+    if (!latestDirty.current && !configDirty) return true;
     return new Promise<boolean>(resolve => setLeaveRequest({ resolve }));
   }
 
@@ -194,8 +201,12 @@ export default function App() {
       discardStoredDraft(next.id);
       return null;
     }
-    if (stored.assetId !== next.id || stored.baseVersionId !== next.currentVersionId || !stored.document?.frames?.length) {
+    if (stored.assetId !== next.id || !stored.document?.frames?.length) {
       discardStoredDraft(next.id);
+      return null;
+    }
+    if (stored.baseVersionId !== next.currentVersionId) {
+      setConflictingDraft(stored);
       return null;
     }
     const updated = new Date(stored.updatedAt);
@@ -219,14 +230,14 @@ export default function App() {
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
-      if (!dirty && !configDirty) return;
+      if (!dirty && !configDirty && !drawingStroke) return;
       if (dirty) persistDraftSnapshot(latestAsset.current, latestDraft.current);
       event.preventDefault();
       event.returnValue = '';
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
-  }, [dirty, configDirty]);
+  }, [dirty, configDirty, drawingStroke]);
 
   useEffect(() => {
     const close = (event: Event) => {
@@ -244,7 +255,7 @@ export default function App() {
       setBusy(true);
       void (async () => {
         try {
-          if (dirty) await saveDraft();
+          if (dirty || drawingStroke) await saveDraft();
           if (configDirty) await saveProjectConfig();
           resolve(true);
         } catch (error) {
@@ -255,7 +266,7 @@ export default function App() {
     };
     window.addEventListener('pixelart-save-before-close', close);
     return () => window.removeEventListener('pixelart-save-before-close', close);
-  }, [asset, draft, dirty, configDirty, config, paletteText, busy, leaveRequest, frameIndex, selectedLayer]);
+  }, [asset, draft, dirty, drawingStroke, configDirty, config, paletteText, busy, leaveRequest, frameIndex, selectedLayer]);
 
   useEffect(() => {
     if (!playing || !draft) return;
@@ -279,6 +290,7 @@ export default function App() {
   }, [playing, draft, action, direction]);
 
   async function run(task: () => Promise<void>, success?: string) {
+    completeStroke();
     setBusy(true);
     setNotice(null);
     try { await task(); if (success) setNotice({ message: success, error: false }); }
@@ -287,6 +299,7 @@ export default function App() {
   }
 
   function install(next: Asset) {
+    setConflictingDraft(null);
     const recovered = recoverStoredDraft(next);
     const recoveredDocument = recovered?.document || structuredClone(next.document);
     const recoveredLayer = recovered?.selectedLayer && recoveredDocument.layers.some(layer => layer.id === recovered.selectedLayer)
@@ -317,7 +330,7 @@ export default function App() {
     setConfig(projectConfig); setSavedConfig(structuredClone(projectConfig)); setPaletteText(projectConfig.palette.join(', '));
     setAssetWidth(projectConfig.targetWidth); setAssetHeight(projectConfig.targetHeight);
     if (next) install(next);
-    else { setAsset(null); setDraft(null); setDirty(false); setReport(null); setPreview(null); }
+    else { setAsset(null); setDraft(null); setDirty(false); setReport(null); setPreview(null); setConflictingDraft(null); }
   }
 
   async function switchAsset(id: string) {
@@ -407,17 +420,28 @@ export default function App() {
   }
 
   function edit(change: (document: Document) => void) {
-    if (!draft || busy || preview || playing) return;
-    const next = structuredClone(draft);
+    const current = latestDraft.current;
+    if (!current || (busy && !finishingStroke.current) || preview || playing) return;
+    const next = structuredClone(current);
     change(next);
-    setUndo(history => [...history.slice(-24), draft]); setRedo([]); setDraft(next); setDirty(true); setReport(null); setFinding(null);
+    latestDraft.current = next; latestDirty.current = true;
+    setUndo(history => [...history.slice(-24), current]); setRedo([]); setDraft(next); setDirty(true); setReport(null); setFinding(null);
+  }
+
+  function completeStroke() {
+    if (!canvasEditorRef.current) return;
+    finishingStroke.current = true;
+    try { flushSync(() => canvasEditorRef.current?.finishStroke()); }
+    finally { finishingStroke.current = false; }
   }
 
   async function saveDraft() {
-    if (!asset || !draft) return;
-    const next = await api<Asset>(`/assets/${asset.id}/save`, { expectedCurrentVersionId: asset.currentVersionId, document: draft });
+    completeStroke();
+    const currentAsset = latestAsset.current, currentDraft = latestDraft.current;
+    if (!currentAsset || !currentDraft) return;
+    const next = await api<Asset>(`/assets/${currentAsset.id}/save`, { expectedCurrentVersionId: currentAsset.currentVersionId, document: currentDraft });
     const index = frameIndex, layer = selectedLayer;
-    discardStoredDraft(asset.id);
+    discardStoredDraft(currentAsset.id);
     install(next); setFrameIndex(index); setSelectedLayer(layer);
     setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
   }
@@ -427,9 +451,11 @@ export default function App() {
     if (!window.confirm(`${warning}删除「${item.name}」及其全部版本？此操作不可撤销。`)) return;
     run(async () => {
       await api(`/assets/${item.id}`, { expectedCurrentVersionId: item.id === asset?.id ? asset.currentVersionId : item.currentVersionId }, 'DELETE');
+      discardStoredDraft(item.id);
       const list = await api<AssetItem[]>(`/projects/${projectId}/assets`);
       setAssets(list); setMenu(null);
       if (item.id === asset?.id) {
+        setConflictingDraft(null);
         if (list.length) install(await api<Asset>(`/assets/${list[0].id}`));
         else {
           setAsset(null); setDraft(null); setDirty(false); setUndo([]); setRedo([]); setReport(null); setFinding(null); setPreview(null); setPlaying(false);
@@ -609,8 +635,12 @@ export default function App() {
     : currentAnimation?.frames.findIndex(ref => ref.frameId === frame?.id) ?? -1;
   const currentRef = currentRefIndex >= 0 ? currentAnimation?.frames[currentRefIndex] : undefined;
   const locked = busy || !!preview || playing || !!leaveRequest;
+  const onionSequence = currentAnimation && currentRefIndex >= 0
+    ? currentAnimation.frames.map(ref => draft?.frames.find(item => item.id === ref.frameId))
+    : draft?.frames ?? [];
+  const onionIndex = currentAnimation && currentRefIndex >= 0 ? currentRefIndex : frameIndex;
   const onionFrames = onion && draft && !playing && !preview
-    ? [draft.frames[frameIndex - 1], draft.frames[frameIndex + 1]].filter((item): item is Frame => Boolean(item))
+    ? [onionSequence[onionIndex - 1], onionSequence[onionIndex + 1]].filter((item): item is Frame => Boolean(item))
     : [];
   const validDuration = Number.isInteger(duration) && duration >= 1 && duration <= 60000;
   useEffect(() => {
@@ -715,6 +745,7 @@ export default function App() {
       const name = (event as CustomEvent<string>).detail;
       setMenu(null);
       const textEditing = isTextEditingTarget(document.activeElement);
+      if (!textEditing && document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if (name === 'copy') {
         if (textEditing) document.execCommand('copy');
         else canvasEditorRef.current?.copySelection();
@@ -755,6 +786,7 @@ export default function App() {
     const shortcuts: Record<string, DrawingTool> = { b: 'pencil', e: 'eraser', i: 'eyedropper', g: 'fill', l: 'line', r: 'rectangle', o: 'ellipse', m: 'select', h: 'pan', v: 'move-layer' };
     const handler = (event: KeyboardEvent) => {
       if (isTextEditingTarget(event.target)) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       const modifier = event.ctrlKey || event.metaKey;
       if (modifier && !event.altKey) {
         const command = event.key.toLowerCase();
@@ -901,13 +933,17 @@ export default function App() {
 
     <main className="workbench">
       <div className="document-bar"><div><span className="breadcrumb">素材 <ChevronRight size={13} /></span><strong>{draft?.name || '工作台'}</strong>{dirty ? <span className="draft-badge">未保存</span> : null}</div><span className="version-label">{asset ? `v${asset.versions.length}` : ''}</span></div>
+      {conflictingDraft ? <div className="draft-conflict" role="status"><span>存在基于旧版本的草稿</span><button className="button secondary" disabled={locked} onClick={() => run(async () => {
+        const next = await api<Asset>(`/projects/${projectId}/assets/copy`, { document: conflictingDraft.document, sourceAssetId: conflictingDraft.assetId, versionId: conflictingDraft.baseVersionId });
+        discardStoredDraft(conflictingDraft.assetId); install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
+      }, '旧版草稿已另存为独立素材')}><CopyPlus size={16} />另存副本</button><IconButton icon={X} label="暂不恢复旧版草稿" onClick={() => setConflictingDraft(null)} /></div> : null}
       {draft && frame ? <>
         <div className="canvas-toolbar">
           <div className="tool-group drawing-tools"><IconButton icon={Pencil} label="铅笔 (B)" active={tool === 'pencil'} disabled={locked} onClick={() => setTool('pencil')} /><IconButton icon={Eraser} label="橡皮 (E)" active={tool === 'eraser'} disabled={locked} onClick={() => setTool('eraser')} /><IconButton icon={Pipette} label="取色器 (I)" active={tool === 'eyedropper'} disabled={locked} onClick={() => setTool('eyedropper')} /><IconButton icon={PaintBucket} label="填充 (G)" active={tool === 'fill'} disabled={locked} onClick={() => setTool('fill')} /><IconButton icon={Minus} label="直线 (L)" active={tool === 'line'} disabled={locked} onClick={() => setTool('line')} /><IconButton icon={Square} label="矩形 (R)" active={tool === 'rectangle'} disabled={locked} onClick={() => setTool('rectangle')} /><IconButton icon={Circle} label="椭圆 (O)" active={tool === 'ellipse'} disabled={locked} onClick={() => setTool('ellipse')} /><IconButton icon={SquareDashedMousePointer} label="矩形选区 (M)" active={tool === 'select'} disabled={locked} onClick={() => setTool('select')} /><IconButton icon={Hand} label="移动画布 (H)" active={tool === 'pan'} disabled={locked} onClick={() => setTool('pan')} /><IconButton icon={Move} label="移动图层 (V)" active={tool === 'move-layer'} disabled={locked} onClick={() => setTool('move-layer')} /><span className="separator" /><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /></div>
           <div className="tool-group"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= 1} onClick={() => setZoom(v => v - 1)} /><span className="zoom-label">{zoom * 100}%</span><IconButton icon={ZoomIn} label="放大" disabled={zoom >= 12} onClick={() => setZoom(v => v + 1)} /></div>
         </div>
         <div className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
-          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={color => { colorRef.current = color; setPickedColor(color); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
+          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={color => { colorRef.current = color; setPickedColor(color); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
           {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} readonly label="修复结果画布" /></div> : null}
         </div>
         {preview ? <div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div> : null}
@@ -950,12 +986,12 @@ export default function App() {
         <div className="panel-divider" /><div className="section-label"><span>帧属性</span><Settings2 size={15} /></div><div className="property-grid"><label>宽<input value={frame.width} readOnly /></label><label>高<input value={frame.height} readOnly /></label></div><label className="field-label">基线 Y<input aria-label="帧基线" type="number" min={0} max={frame.height - 1} value={frame.baselineY ?? ''} placeholder="未设置" disabled={locked} onChange={e => edit(document => { document.frames[frameIndex].baselineY = e.target.value === '' ? null : Number(e.target.value); })} /></label><div className="property-grid">{(['x', 'y'] as const).map(axis => <label key={axis}>原点 {axis.toUpperCase()}<input aria-label={`原点 ${axis}`} type="number" min={0} max={(axis === 'x' ? frame.width : frame.height) - 1} value={frame.origin?.[axis] ?? ''} disabled={locked} onChange={e => edit(document => { const f = document.frames[frameIndex]; f.origin = e.target.value === '' ? null : { ...(f.origin || { x: 0, y: 0 }), [axis]: Number(e.target.value) }; })} /></label>)}</div>
         <FrameMetadataEditor frame={frame} locked={locked} onChange={collisionRects => edit(document => { document.frames[frameIndex].collisionRects = collisionRects; })} />
       </div> : null}
-      {tab === 'quality' ? <div className="panel-content">
+      {tab === 'quality' ? <div className="panel-content"><fieldset className="config-fields" disabled={busy || !!leaveRequest}>
         <div className="section-label"><span>项目检查配置</span><small>{config.targetWidth} × {config.targetHeight}</small></div><div className="property-grid"><label>宽<input aria-label="目标宽度" type="number" min={1} max={512} value={config.targetWidth} onChange={e => patchConfig({ targetWidth: Number(e.target.value) })} /></label><label>高<input aria-label="目标高度" type="number" min={1} max={512} value={config.targetHeight} onChange={e => patchConfig({ targetHeight: Number(e.target.value) })} /></label><label>颜色上限<input aria-label="颜色上限" type="number" min={1} max={256} value={config.maxColors} onChange={e => patchConfig({ maxColors: Number(e.target.value) })} /></label><label>目标基线<input aria-label="目标基线" type="number" min={0} max={config.targetHeight - 1} value={config.targetBaselineY ?? ''} placeholder="未设置" onChange={e => patchConfig({ targetBaselineY: e.target.value === '' ? null : Number(e.target.value) })} /></label><label>idle 帧数<input aria-label="预期 idle 帧数" type="number" min={1} max={64} value={config.expectedIdleFrames} onChange={e => patchConfig({ expectedIdleFrames: Number(e.target.value) })} /></label><label>walk 帧数<input aria-label="预期 walk 帧数" type="number" min={1} max={64} value={config.expectedWalkFrames} onChange={e => patchConfig({ expectedWalkFrames: Number(e.target.value) })} /></label><label>基线容差<input aria-label="基线容差" type="number" min={0} max={512} value={config.baselineTolerancePx} onChange={e => patchConfig({ baselineTolerancePx: Number(e.target.value) })} /></label><label>导出检查目标<select aria-label="导出检查目标" value={config.exportTarget} onChange={e => patchConfig({ exportTarget: e.target.value as CheckConfig['exportTarget'] })}><option value="png">PNG</option><option value="json">JSON</option><option value="godot">Godot</option></select></label></div>
         <label className="checkbox-row"><input type="checkbox" checked={config.allowSemiTransparent} onChange={e => patchConfig({ allowSemiTransparent: e.target.checked })} />允许半透明</label><label className="field-label">项目调色板<textarea aria-label="项目调色板" rows={2} value={paletteText} placeholder="#24343E, #218F83" onChange={e => { setPaletteText(e.target.value); setReport(null); }} /></label><button className="text-command" onClick={() => { const palette = paletteText.split(/[,\s]+/).filter(Boolean); if (palette.some(c => !/^#[\da-f]{6}$/i.test(c))) setNotice({ message: '调色板请使用 #RRGGBB，以逗号或空格分隔', error: true }); else { patchConfig({ palette }); setNotice({ message: '调色板已更新', error: false }); } }}>应用调色板</button>
         <div className="rule-list">{Object.entries(RULE_NAMES).map(([id, name]) => <label className="rule-row" key={id}><input type="checkbox" checked={config.enabled[id]} onChange={e => patchConfig({ enabled: { ...config.enabled, [id]: e.target.checked } })} /><span>{name}</span>{report ? <span className={`rule-state ${report.rules.find(r => r.ruleId === id)?.status}`} title={report.rules.find(r => r.ruleId === id)?.reason || ''}>{statusNames[report.rules.find(r => r.ruleId === id)?.status || '']}</span> : null}</label>)}</div>
         <button className="button secondary full" disabled={!projectId || busy || !configDirty} onClick={() => run(saveProjectConfig, '项目配置已保存')}><Save size={16} />保存项目配置</button>
-        <button className="button primary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Report>(`/assets/${asset!.id}/check`, { versionId: asset!.currentVersionId, config }); setReport(result); setReports(history => [result, ...history]); setFinding(null); })}><ScanLine size={16} />运行质检</button>
+        </fieldset><button className="button primary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Report>(`/assets/${asset!.id}/check`, { versionId: asset!.currentVersionId, config }); setReport(result); setReports(history => [result, ...history]); setFinding(null); })}><ScanLine size={16} />运行质检</button>
         {reports.length ? <label className="field-label">检查历史<select aria-label="检查历史" value={report?.id ?? ''} onChange={event => { setReport(reports.find(item => item.id === event.target.value) ?? null); setFinding(null); }}><option value="">选择报告</option>{reports.map(item => <option key={item.id} value={item.id}>{item.created ? new Date(item.created).toLocaleString('zh-CN') : item.id?.slice(0, 8)} · {item.findings.length} 个问题</option>)}</select></label> : null}
         {report ? <><div className="report-summary"><CheckCheck size={17} /><span>{report.colorCount} 色 · {report.findings.length} 个问题</span></div><div className="findings">{report.findings.map(item => <button key={item.id} className={`finding-item ${finding?.id === item.id ? 'selected' : ''}`} onClick={() => { setFinding(item); const index = draft?.frames.findIndex(f => f.id === item.frameId) ?? -1; if (index >= 0) setFrameIndex(index); }}><span className={`severity ${item.severity}`}>{item.severity === 'warning' ? '警告' : item.severity === 'blocking' ? '阻断' : '错误'}</span><strong>{RULE_NAMES[item.ruleId]}</strong><p>{item.message}</p></button>)}</div>{report.rules.filter(r => r.status === 'skipped').map(r => <p key={r.ruleId} className="skip-reason">{RULE_NAMES[r.ruleId]}：{r.reason}</p>)}</> : null}
         <div className="panel-divider" /><div className="section-label"><span>修复动作</span><Sparkles size={15} /></div><select className="full" aria-label="修复动作" value={fix} onChange={e => setFix(e.target.value)}>{Object.entries(FIX_NAMES).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select><button className="button secondary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Preview>(`/assets/${asset!.id}/preview`, { versionId: asset!.currentVersionId, config, actions: [{ id: fix }] }); setPreview(result); setPlaying(false); }, '预览已生成')}><RefreshCw size={16} />预览修复</button>

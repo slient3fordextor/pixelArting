@@ -24,6 +24,7 @@ export type CanvasEditorHandle = {
   clearSelection: () => void;
   hasSelection: () => boolean;
   hasClipboard: () => boolean;
+  finishStroke: () => void;
 };
 type Props = {
   frame: Frame;
@@ -42,6 +43,7 @@ type Props = {
   onPickColor?: (color: string) => void;
   onSelectionChange?: (selection: Rect | null) => void;
   onClipboardChange?: (available: boolean) => void;
+  onStrokeStateChange?: (drawing: boolean) => void;
 };
 
 function clamp(value: number, max: number) {
@@ -114,6 +116,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     onPickColor,
     onSelectionChange,
     onClipboardChange,
+    onStrokeStateChange,
     label = '像素编辑画布',
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -225,6 +228,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     clearSelection: () => updateSelection(null),
     hasSelection: () => selectionRef.current !== null,
     hasClipboard: () => selectionClipboard.current !== null,
+    finishStroke: () => finish(),
   }), [frame, layers, activeLayer, readonly]);
 
   drawRef.current = () => {
@@ -482,6 +486,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     drawRef.current();
   }
   function finish(cancelled = false) {
+    onStrokeStateChange?.(false);
     if (panDrawing.current) {
       panDrawing.current = false;
       panStart.current = null;
@@ -524,6 +529,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
   useEffect(() => {
     const cancelMove = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       if (event.key === 'Escape' && drawing.current && (moveBuffer.current || selectionMoving.current)) {
         event.preventDefault();
         finish(true);
@@ -589,6 +595,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
               return;
             }
             if (tool === 'select') {
+              onStrokeStateChange?.(true);
               const current = selectionRef.current;
               if (current && point[0] >= current.x && point[0] < current.x + current.width && point[1] >= current.y && point[1] < current.y + current.height && selected && !selected.locked && selected.visible) {
                 const context = sourceRef.current.get(activeLayer)?.getContext('2d');
@@ -626,6 +633,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
               return;
             }
             drawing.current = true;
+            onStrokeStateChange?.(true);
             start.current = point;
             previous.current = null;
             changed.current = false;
