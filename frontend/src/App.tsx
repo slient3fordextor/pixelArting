@@ -54,10 +54,9 @@ export default function App() {
   const [dirty, setDirty] = useState(false);
   const [undo, setUndo] = useState<Document[]>([]);
   const [redo, setRedo] = useState<Document[]>([]);
-  const [config, setConfig] = useState<CheckConfig>(() => {
-    try { return { ...defaultConfig, ...JSON.parse(localStorage.getItem('pixelart-config-v1') || '{}') }; }
-    catch { return defaultConfig; }
-  });
+  const [config, setConfig] = useState<CheckConfig>(() => structuredClone(defaultConfig));
+  const [savedConfig, setSavedConfig] = useState<CheckConfig>(() => structuredClone(defaultConfig));
+  const [reports, setReports] = useState<Report[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [finding, setFinding] = useState<Finding | null>(null);
   const [tab, setTab] = useState<'layers' | 'quality' | 'versions'>('layers');
@@ -113,8 +112,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('pixelart-config-v1', JSON.stringify(config));
-  }, [config]);
+    if (!asset) { setReports([]); return; }
+    let cancelled = false;
+    api<Report[]>(`/assets/${asset.id}/reports?versionId=${asset.currentVersionId}`).then(history => {
+      if (!cancelled) setReports(history);
+    }).catch(() => { if (!cancelled) setReports([]); });
+    return () => { cancelled = true; };
+  }, [asset?.id, asset?.currentVersionId]);
 
   function draftStorageKey(assetId: string) {
     return `${DRAFT_STORAGE_PREFIX}${assetId}`;
@@ -242,10 +246,15 @@ export default function App() {
   async function switchProject(id: string) {
     if (!confirmDiscardCurrentDraft('放弃未保存的编辑并切换项目？')) return;
     const sequence = ++loadSequence.current;
-    const list = await api<AssetItem[]>(`/projects/${id}/assets`);
+    const [list, projectConfig] = await Promise.all([
+      api<AssetItem[]>(`/projects/${id}/assets`),
+      api<CheckConfig>(`/projects/${id}/check-config`),
+    ]);
     const next = list.length ? await api<Asset>(`/assets/${list[0].id}`) : null;
     if (sequence !== loadSequence.current) return;
     setProjectId(id); setAssets(list);
+    setConfig(projectConfig); setSavedConfig(structuredClone(projectConfig)); setPaletteText(projectConfig.palette.join(', '));
+    setAssetWidth(projectConfig.targetWidth); setAssetHeight(projectConfig.targetHeight);
     if (next) install(next);
     else { setAsset(null); setDraft(null); setDirty(false); setReport(null); setPreview(null); }
   }
@@ -369,6 +378,12 @@ export default function App() {
 
   function patchConfig(change: Partial<CheckConfig>) {
     setConfig(current => ({ ...current, ...change })); setReport(null); setFinding(null);
+  }
+
+  async function saveProjectConfig() {
+    if (!projectId) return;
+    const updated = await api<CheckConfig>(`/projects/${projectId}/check-config`, config, 'PUT');
+    setConfig(updated); setSavedConfig(structuredClone(updated)); setPaletteText(updated.palette.join(', '));
   }
 
   function patchLayer(id: string, change: Partial<Layer>) {
@@ -771,10 +786,12 @@ export default function App() {
         <div className="panel-divider" /><div className="section-label"><span>帧属性</span><Settings2 size={15} /></div><div className="property-grid"><label>宽<input value={frame.width} readOnly /></label><label>高<input value={frame.height} readOnly /></label></div><label className="field-label">基线 Y<input aria-label="帧基线" type="number" min={0} max={frame.height - 1} value={frame.baselineY ?? ''} placeholder="未设置" disabled={locked} onChange={e => edit(document => { document.frames[frameIndex].baselineY = e.target.value === '' ? null : Number(e.target.value); })} /></label><div className="property-grid">{(['x', 'y'] as const).map(axis => <label key={axis}>原点 {axis.toUpperCase()}<input aria-label={`原点 ${axis}`} type="number" min={0} max={(axis === 'x' ? frame.width : frame.height) - 1} value={frame.origin?.[axis] ?? ''} disabled={locked} onChange={e => edit(document => { const f = document.frames[frameIndex]; f.origin = e.target.value === '' ? null : { ...(f.origin || { x: 0, y: 0 }), [axis]: Number(e.target.value) }; })} /></label>)}</div>
       </div> : null}
       {tab === 'quality' ? <div className="panel-content">
-        <div className="section-label"><span>检查配置</span><small>64 × 64</small></div><div className="property-grid"><label>宽<input aria-label="目标宽度" type="number" min={1} max={512} value={config.targetWidth} onChange={e => patchConfig({ targetWidth: Number(e.target.value) })} /></label><label>高<input aria-label="目标高度" type="number" min={1} max={512} value={config.targetHeight} onChange={e => patchConfig({ targetHeight: Number(e.target.value) })} /></label><label>颜色上限<input aria-label="颜色上限" type="number" min={1} max={256} value={config.maxColors} onChange={e => patchConfig({ maxColors: Number(e.target.value) })} /></label><label>目标基线<input aria-label="目标基线" type="number" min={0} max={config.targetHeight - 1} value={config.targetBaselineY ?? ''} placeholder="未设置" onChange={e => patchConfig({ targetBaselineY: e.target.value === '' ? null : Number(e.target.value) })} /></label></div>
+        <div className="section-label"><span>项目检查配置</span><small>{config.targetWidth} × {config.targetHeight}</small></div><div className="property-grid"><label>宽<input aria-label="目标宽度" type="number" min={1} max={512} value={config.targetWidth} onChange={e => patchConfig({ targetWidth: Number(e.target.value) })} /></label><label>高<input aria-label="目标高度" type="number" min={1} max={512} value={config.targetHeight} onChange={e => patchConfig({ targetHeight: Number(e.target.value) })} /></label><label>颜色上限<input aria-label="颜色上限" type="number" min={1} max={256} value={config.maxColors} onChange={e => patchConfig({ maxColors: Number(e.target.value) })} /></label><label>目标基线<input aria-label="目标基线" type="number" min={0} max={config.targetHeight - 1} value={config.targetBaselineY ?? ''} placeholder="未设置" onChange={e => patchConfig({ targetBaselineY: e.target.value === '' ? null : Number(e.target.value) })} /></label><label>idle 帧数<input aria-label="预期 idle 帧数" type="number" min={1} max={64} value={config.expectedIdleFrames} onChange={e => patchConfig({ expectedIdleFrames: Number(e.target.value) })} /></label><label>walk 帧数<input aria-label="预期 walk 帧数" type="number" min={1} max={64} value={config.expectedWalkFrames} onChange={e => patchConfig({ expectedWalkFrames: Number(e.target.value) })} /></label><label>基线容差<input aria-label="基线容差" type="number" min={0} max={512} value={config.baselineTolerancePx} onChange={e => patchConfig({ baselineTolerancePx: Number(e.target.value) })} /></label><label>导出检查目标<select aria-label="导出检查目标" value={config.exportTarget} onChange={e => patchConfig({ exportTarget: e.target.value as CheckConfig['exportTarget'] })}><option value="png">PNG</option><option value="json">JSON</option><option value="godot">Godot</option></select></label></div>
         <label className="checkbox-row"><input type="checkbox" checked={config.allowSemiTransparent} onChange={e => patchConfig({ allowSemiTransparent: e.target.checked })} />允许半透明</label><label className="field-label">项目调色板<textarea aria-label="项目调色板" rows={2} value={paletteText} placeholder="#24343E, #218F83" onChange={e => { setPaletteText(e.target.value); setReport(null); }} /></label><button className="text-command" onClick={() => { const palette = paletteText.split(/[,\s]+/).filter(Boolean); if (palette.some(c => !/^#[\da-f]{6}$/i.test(c))) setNotice({ message: '调色板请使用 #RRGGBB，以逗号或空格分隔', error: true }); else { patchConfig({ palette }); setNotice({ message: '调色板已更新', error: false }); } }}>应用调色板</button>
         <div className="rule-list">{Object.entries(RULE_NAMES).map(([id, name]) => <label className="rule-row" key={id}><input type="checkbox" checked={config.enabled[id]} onChange={e => patchConfig({ enabled: { ...config.enabled, [id]: e.target.checked } })} /><span>{name}</span>{report ? <span className={`rule-state ${report.rules.find(r => r.ruleId === id)?.status}`} title={report.rules.find(r => r.ruleId === id)?.reason || ''}>{statusNames[report.rules.find(r => r.ruleId === id)?.status || '']}</span> : null}</label>)}</div>
-        <button className="button primary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Report>(`/assets/${asset!.id}/check`, { versionId: asset!.currentVersionId, config }); setReport(result); setFinding(null); })}><ScanLine size={16} />运行质检</button>
+        <button className="button secondary full" disabled={!projectId || busy || JSON.stringify(config) === JSON.stringify(savedConfig)} onClick={() => run(saveProjectConfig, '项目配置已保存')}><Save size={16} />保存项目配置</button>
+        <button className="button primary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Report>(`/assets/${asset!.id}/check`, { versionId: asset!.currentVersionId, config }); setReport(result); setReports(history => [result, ...history]); setFinding(null); })}><ScanLine size={16} />运行质检</button>
+        {reports.length ? <label className="field-label">检查历史<select aria-label="检查历史" value={report?.id ?? ''} onChange={event => { setReport(reports.find(item => item.id === event.target.value) ?? null); setFinding(null); }}><option value="">选择报告</option>{reports.map(item => <option key={item.id} value={item.id}>{item.created ? new Date(item.created).toLocaleString('zh-CN') : item.id?.slice(0, 8)} · {item.findings.length} 个问题</option>)}</select></label> : null}
         {report ? <><div className="report-summary"><CheckCheck size={17} /><span>{report.colorCount} 色 · {report.findings.length} 个问题</span></div><div className="findings">{report.findings.map(item => <button key={item.id} className={`finding-item ${finding?.id === item.id ? 'selected' : ''}`} onClick={() => { setFinding(item); const index = draft?.frames.findIndex(f => f.id === item.frameId) ?? -1; if (index >= 0) setFrameIndex(index); }}><span className={`severity ${item.severity}`}>{item.severity === 'warning' ? '警告' : item.severity === 'blocking' ? '阻断' : '错误'}</span><strong>{RULE_NAMES[item.ruleId]}</strong><p>{item.message}</p></button>)}</div>{report.rules.filter(r => r.status === 'skipped').map(r => <p key={r.ruleId} className="skip-reason">{RULE_NAMES[r.ruleId]}：{r.reason}</p>)}</> : null}
         <div className="panel-divider" /><div className="section-label"><span>修复动作</span><Sparkles size={15} /></div><select className="full" aria-label="修复动作" value={fix} onChange={e => setFix(e.target.value)}>{Object.entries(FIX_NAMES).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select><button className="button secondary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Preview>(`/assets/${asset!.id}/preview`, { versionId: asset!.currentVersionId, config, actions: [{ id: fix }] }); setPreview(result); setPlaying(false); }, '预览已生成')}><RefreshCw size={16} />预览修复</button>
       </div> : null}
