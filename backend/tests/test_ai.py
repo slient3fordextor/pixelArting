@@ -239,6 +239,86 @@ def test_restart_fails_interrupted_tasks_and_queue_is_bounded(tmp_path):
         assert "重启" in client.get(f"/api/ai/generations/{running.id}").json()["error"]
 
 
+def test_ai_profiles_crud_activation_and_legacy_config(client):
+    initial = client.get("/api/ai/profiles")
+    assert initial.status_code == 200
+    payload = initial.json()
+    assert payload["activeId"] == "default"
+    assert len(payload["profiles"]) == 1
+    assert "apiKey" not in json.dumps(payload)
+
+    created = client.post("/api/ai/profiles", json={
+        "name": "第二服务",
+        "baseUrl": "https://second.example/v1",
+        "apiKey": "profile-secret",
+        "textModel": "second-text",
+        "imageModel": "second-image",
+    })
+    assert created.status_code == 201, created.text
+    profile = created.json()
+    assert profile["name"] == "第二服务"
+    assert profile["hasApiKey"] is True
+    assert "profile-secret" not in json.dumps(profile)
+    assert client.post("/api/ai/profiles", json={"name": "第二服务"}).status_code == 409
+    assert client.delete("/api/ai/profiles/default").status_code == 409
+
+    activated = client.post(f"/api/ai/profiles/{profile['id']}/activate")
+    assert activated.status_code == 200
+    assert activated.json()["activeId"] == profile["id"]
+    legacy = client.get("/api/ai/config").json()
+    assert legacy["textModel"] == "second-text"
+    assert legacy["hasApiKey"] is True
+    assert "apiKey" not in legacy
+
+    updated = client.put(f"/api/ai/profiles/{profile['id']}", json={"name": "第二服务改名", "textModel": "second-text-v2", "clearApiKey": True})
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "第二服务改名"
+    assert updated.json()["hasApiKey"] is False
+    assert client.delete("/api/ai/profiles/default").status_code == 200
+    assert client.get("/api/ai/profiles").json()["activeId"] == profile["id"]
+
+
+def test_old_single_profile_row_is_migrated(tmp_path):
+    first = Store(tmp_path)
+    with first.connection() as conn:
+        conn.execute("DELETE FROM ai_provider_state")
+        conn.execute("DELETE FROM ai_provider_profiles")
+        conn.execute("UPDATE ai_provider_config SET config=?,updated=? WHERE id=1", (AiProviderConfig(apiKey=KEY, textModel="legacy-text").model_dump_json(), "legacy"))
+    migrated = Store(tmp_path)
+    assert migrated.ai_config().textModel == "legacy-text"
+    profiles = migrated.list_ai_profiles()
+    assert profiles["activeId"] == "default"
+    assert profiles["profiles"][0]["hasApiKey"] is True
+    assert KEY not in json.dumps(profiles)
+
+
+def test_generation_uses_provider_snapshot_when_active_profile_changes(client):
+    configure(client)
+    second = client.post("/api/ai/profiles", json={"name": "切换服务", "apiKey": "second-secret", "textModel": "second-text"}).json()
+    started, release = threading.Event(), threading.Event()
+    seen = []
+
+    class SnapshotProvider(DrawingProvider):
+        def __init__(self, config):
+            super().__init__(config)
+            seen.append((config.apiKey, config.textModel))
+
+        def generate_text(self, request):
+            started.set()
+            assert release.wait(5)
+            return drawing_result()
+
+    client.app.state.ai_provider_factory = SnapshotProvider
+    queued = generate(client)
+    try:
+        assert started.wait(2)
+        assert client.post(f"/api/ai/profiles/{second['id']}/activate").status_code == 200
+    finally:
+        release.set()
+    assert wait_task(client, queued["id"])["status"] == "succeeded"
+    assert seen == [(KEY, "text-test")]
+
+
 def test_openai_compatible_text_payload_and_api_url():
     captured = []
 

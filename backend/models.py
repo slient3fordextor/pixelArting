@@ -212,6 +212,37 @@ class AiConfigUpdate(Model):
         return None if value is None else AiProviderConfig.validate_image_size(value)
 
 
+class AiProfileCreate(AiConfigUpdate):
+    """Payload for creating a named provider profile.
+
+    Omitted provider fields use the same defaults as ``AiProviderConfig``.
+    ``apiKey`` is accepted only in the request body and is never part of a
+    public profile response.
+    """
+
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_profile_name(cls, value):
+        if not isinstance(value, str):
+            raise ValueError("AI 配置名称必须是字符串")
+        return value.strip()
+
+
+class AiProfileUpdate(AiConfigUpdate):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_optional_profile_name(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            raise ValueError("AI 配置名称必须是字符串")
+        return value.strip()
+
+
 class AiGenerationRequest(Model):
     projectId: str | None = None
     mode: Literal["agent_draw", "image_model"]

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .images import checksum, validate_images
-from .models import AiConfigUpdate, AiGeneration, AiGenerationRequest, AiProviderConfig, CheckConfig, Document
+from .models import AiConfigUpdate, AiGeneration, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, AiProviderConfig, CheckConfig, Document
 
 
 def uid() -> str:
@@ -40,7 +40,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS previews (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), base_version TEXT NOT NULL, document TEXT NOT NULL, checksum TEXT NOT NULL, actions TEXT NOT NULL, config TEXT NOT NULL, result_version TEXT, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS project_configs (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, config TEXT NOT NULL, updated TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ai_provider_config (id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL, updated TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS ai_generations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE, mode TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ai_provider_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, config TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ai_provider_state (id INTEGER PRIMARY KEY CHECK(id=1), active_id TEXT NOT NULL REFERENCES ai_provider_profiles(id));
+                CREATE TABLE IF NOT EXISTS ai_generations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE, mode TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL, provider_config TEXT);
                 CREATE TABLE IF NOT EXISTS ai_candidate_selections (generation_id TEXT NOT NULL REFERENCES ai_generations(id) ON DELETE CASCADE, candidate_id TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL, PRIMARY KEY(generation_id,candidate_id,project_id));
                 CREATE INDEX IF NOT EXISTS reports_asset_created ON reports(asset_id, created DESC);
                 CREATE INDEX IF NOT EXISTS ai_generations_project_created ON ai_generations(project_id, created DESC);
@@ -51,6 +53,38 @@ class Store:
                 "INSERT OR IGNORE INTO project_configs(project_id, config, updated) SELECT id, ?, created FROM projects",
                 (default_config,),
             )
+            generation_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ai_generations)")}
+            if "provider_config" not in generation_columns:
+                connection.execute("ALTER TABLE ai_generations ADD COLUMN provider_config TEXT")
+            # The first release stored one provider config in ai_provider_config.
+            # Keep that table for old clients, but migrate it into the profile
+            # store exactly once and make the migrated profile active.
+            self._migrate_ai_profiles(connection)
+
+    def _migrate_ai_profiles(self, connection):
+        row = connection.execute("SELECT id FROM ai_provider_profiles ORDER BY created LIMIT 1").fetchone()
+        if row:
+            active = connection.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
+            if not active or not connection.execute("SELECT id FROM ai_provider_profiles WHERE id=?", (active["active_id"],)).fetchone():
+                connection.execute("INSERT INTO ai_provider_state(id,active_id) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET active_id=excluded.active_id", (row["id"],))
+            return
+        legacy = connection.execute("SELECT config FROM ai_provider_config WHERE id=1").fetchone()
+        try:
+            config = AiProviderConfig.model_validate_json(legacy["config"]) if legacy else AiProviderConfig()
+        except ValueError:
+            config = AiProviderConfig()
+        created = now()
+        profile_id = "default"
+        connection.execute(
+            "INSERT INTO ai_provider_profiles(id,name,config,created,updated) VALUES(?,?,?,?,?)",
+            (profile_id, "默认配置", config.model_dump_json(), created, created),
+        )
+        connection.execute("INSERT INTO ai_provider_state(id,active_id) VALUES(1,?)", (profile_id,))
+        # Ensure the legacy endpoint sees the migrated values on old databases.
+        connection.execute(
+            "INSERT INTO ai_provider_config(id,config,updated) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated",
+            (config.model_dump_json(), created),
+        )
 
     @contextmanager
     def connection(self):
@@ -73,13 +107,40 @@ class Store:
             )
         return project
 
-    def ai_config(self) -> AiProviderConfig:
+    @staticmethod
+    def _profile_public(profile_id: str, name: str, config: AiProviderConfig, created: str, updated: str) -> dict:
+        return {
+            "id": profile_id,
+            "name": name,
+            **Store.public_ai_config(config),
+            "created": created,
+            "updated": updated,
+        }
+
+    def _active_profile_row(self):
         with self.connection() as conn:
-            row = conn.execute("SELECT config FROM ai_provider_config WHERE id=1").fetchone()
+            row = conn.execute(
+                "SELECT p.* FROM ai_provider_profiles p JOIN ai_provider_state s ON s.active_id=p.id WHERE s.id=1"
+            ).fetchone()
+        if not row:
+            raise ValueError("AI 配置档案不存在，请重新保存配置")
+        return row
+
+    def ai_config(self) -> AiProviderConfig:
+        """Return a copy of the currently active provider configuration."""
+        row = self._active_profile_row()
         try:
-            return AiProviderConfig.model_validate_json(row["config"]) if row else AiProviderConfig()
+            return AiProviderConfig.model_validate_json(row["config"])
         except ValueError as error:
             raise ValueError("AI 配置损坏，请重新保存配置") from error
+
+    def ai_config_profile(self) -> dict:
+        row = self._active_profile_row()
+        try:
+            config = AiProviderConfig.model_validate_json(row["config"])
+        except ValueError as error:
+            raise ValueError("AI 配置损坏，请重新保存配置") from error
+        return self._profile_public(row["id"], row["name"], config, row["created"], row["updated"])
 
     @staticmethod
     def public_ai_config(config: AiProviderConfig) -> dict:
@@ -94,21 +155,112 @@ class Store:
         if update.clearApiKey:
             fields["apiKey"] = None
         config = AiProviderConfig.model_validate({**current.model_dump(), **fields})
+        result = self._save_profile_config(self._active_profile_row()["id"], config)
+        return result
+
+    def _save_profile_config(self, profile_id: str, config: AiProviderConfig, name: str | None = None) -> dict:
         self.db.chmod(0o600)
+        updated = now()
         with self.connection() as conn:
+            row = conn.execute("SELECT * FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
+            if not row:
+                raise KeyError("AI 配置档案不存在")
+            profile_name = name if name is not None else row["name"]
+            if name is not None and not name.strip():
+                raise ValueError("AI 配置名称不能为空")
+            if name is not None and conn.execute("SELECT id FROM ai_provider_profiles WHERE name=? COLLATE NOCASE AND id<>?", (name.strip(), profile_id)).fetchone():
+                raise Conflict("AI 配置名称已存在")
             conn.execute(
-                "INSERT INTO ai_provider_config(id,config,updated) VALUES (1,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated",
-                (config.model_dump_json(), now()),
+                "UPDATE ai_provider_profiles SET name=?,config=?,updated=? WHERE id=?",
+                (profile_name.strip(), config.model_dump_json(), updated, profile_id),
             )
+            # Keep the legacy single-profile row synchronized for old clients.
+            active = conn.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
+            if active and active["active_id"] == profile_id:
+                conn.execute(
+                    "INSERT INTO ai_provider_config(id,config,updated) VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated",
+                    (config.model_dump_json(), updated),
+                )
         for suffix in ("-wal", "-shm"):
             sidecar = Path(str(self.db) + suffix)
             if sidecar.exists():
                 sidecar.chmod(0o600)
-        return self.public_ai_config(config)
+        return self._profile_public(profile_id, profile_name.strip(), config, row["created"], updated)
 
-    def create_generation(self, request: AiGenerationRequest) -> AiGeneration:
+    def list_ai_profiles(self) -> dict:
+        with self.connection() as conn:
+            rows = conn.execute("SELECT * FROM ai_provider_profiles ORDER BY created, id").fetchall()
+            active = conn.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
+        profiles = []
+        for row in rows:
+            try:
+                config = AiProviderConfig.model_validate_json(row["config"])
+            except ValueError as error:
+                raise ValueError("AI 配置损坏，请重新保存配置") from error
+            profiles.append(self._profile_public(row["id"], row["name"], config, row["created"], row["updated"]))
+        return {"profiles": profiles, "activeId": active["active_id"] if active else None}
+
+    def create_ai_profile(self, body: AiProfileCreate) -> dict:
+        fields = body.model_dump(exclude_none=True, exclude={"name", "clearApiKey"})
+        if not fields.get("apiKey"):
+            fields.pop("apiKey", None)
+        if body.clearApiKey:
+            fields["apiKey"] = None
+        config = AiProviderConfig.model_validate({**AiProviderConfig().model_dump(), **fields})
+        profile_id, created = uid(), now()
+        name = body.name.strip()
+        with self.connection() as conn:
+            if conn.execute("SELECT id FROM ai_provider_profiles WHERE name=? COLLATE NOCASE", (name,)).fetchone():
+                raise Conflict("AI 配置名称已存在")
+            count = conn.execute("SELECT COUNT(*) FROM ai_provider_profiles").fetchone()[0]
+            if count >= 32:
+                raise Conflict("AI 配置档案数量已达到上限")
+            conn.execute("INSERT INTO ai_provider_profiles VALUES(?,?,?,?,?)", (profile_id, name, config.model_dump_json(), created, created))
+        self.db.chmod(0o600)
+        return self._profile_public(profile_id, name, config, created, created)
+
+    def update_ai_profile(self, profile_id: str, body: AiProfileUpdate) -> dict:
+        with self.connection() as conn:
+            row = conn.execute("SELECT config FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
+        if not row:
+            raise KeyError("AI 配置档案不存在")
+        try:
+            current = AiProviderConfig.model_validate_json(row["config"])
+        except ValueError as error:
+            raise ValueError("AI 配置损坏，请重新保存配置") from error
+        fields = body.model_dump(exclude_none=True, exclude={"name", "clearApiKey"})
+        if not fields.get("apiKey"):
+            fields.pop("apiKey", None)
+        if body.clearApiKey:
+            fields["apiKey"] = None
+        config = AiProviderConfig.model_validate({**current.model_dump(), **fields})
+        return self._save_profile_config(profile_id, config, body.name)
+
+    def activate_ai_profile(self, profile_id: str) -> dict:
+        with self.connection() as conn:
+            row = conn.execute("SELECT id FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
+            if not row:
+                raise KeyError("AI 配置档案不存在")
+            conn.execute("INSERT INTO ai_provider_state(id,active_id) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET active_id=excluded.active_id", (profile_id,))
+            profile = conn.execute("SELECT * FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
+            conn.execute("INSERT INTO ai_provider_config(id,config,updated) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated", (profile["config"], now()))
+        config = AiProviderConfig.model_validate_json(profile["config"])
+        return {"activeId": profile_id, "profile": self._profile_public(profile_id, profile["name"], config, profile["created"], profile["updated"])}
+
+    def delete_ai_profile(self, profile_id: str):
+        with self.connection() as conn:
+            row = conn.execute("SELECT id FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
+            if not row:
+                raise KeyError("AI 配置档案不存在")
+            active = conn.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
+            if active and active["active_id"] == profile_id:
+                raise Conflict("请先切换其他 AI 配置档案，再删除当前档案")
+            conn.execute("DELETE FROM ai_provider_profiles WHERE id=?", (profile_id,))
+        return {"deleted": True, "id": profile_id}
+
+    def create_generation(self, request: AiGenerationRequest, provider_config: AiProviderConfig | None = None) -> AiGeneration:
         generation_id, created = uid(), now()
+        provider_json = provider_config.model_dump_json() if provider_config is not None else None
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             count = conn.execute("SELECT COUNT(*) FROM ai_generations WHERE status IN ('queued','running')").fetchone()[0]
@@ -117,10 +269,20 @@ class Store:
             if request.projectId is not None and not conn.execute("SELECT id FROM projects WHERE id=?", (request.projectId,)).fetchone():
                 raise KeyError("项目不存在")
             conn.execute(
-                "INSERT INTO ai_generations VALUES (?,?,?,?,?,?,?,?,?)",
-                (generation_id, request.projectId, request.mode, "queued", request.model_dump_json(), None, None, created, created),
+                "INSERT INTO ai_generations (id,project_id,mode,status,request,result,error,created,updated,provider_config) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (generation_id, request.projectId, request.mode, "queued", request.model_dump_json(), None, None, created, created, provider_json),
             )
         return self.generation(generation_id)
+
+    def generation_config(self, generation_id: str) -> AiProviderConfig | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT provider_config FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
+        if not row or not row["provider_config"]:
+            return None
+        try:
+            return AiProviderConfig.model_validate_json(row["provider_config"])
+        except ValueError as error:
+            raise ValueError("AI 任务配置损坏，请重新生成") from error
 
     def select_ai_candidate(self, generation_id: str, candidate_id: str, project_id: str, document: Document):
         validate_images(document)

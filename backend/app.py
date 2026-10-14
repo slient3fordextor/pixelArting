@@ -18,7 +18,7 @@ from .exports import export_bundle
 from .exchange import MAX_ARCHIVE_BYTES, MAX_EXPANDED_BYTES, MAX_PROJECT_ASSETS, export_project, import_bundle, import_project
 from .images import MAX_UPLOAD_BYTES, composite, encode_image, png_bytes
 from .imports import SheetLayout, imported_document, preview_import, retain_png
-from .models import AiCandidateSelect, AiConfigUpdate, AiGenerationRequest, BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
+from .models import AiCandidateSelect, AiConfigUpdate, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
 from .quality import inspect
 from .repairs import repair
 from .sample import sample_document
@@ -43,7 +43,7 @@ def create_app(data_root: Path | None = None):
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error):
-        if request.url.path == "/api/ai/config":
+        if request.url.path == "/api/ai/config" or request.url.path.startswith("/api/ai/profiles"):
             # FastAPI's default validation output contains the rejected input,
             # which must never include an API key.
             return JSONResponse({"detail": [
@@ -96,17 +96,40 @@ def create_app(data_root: Path | None = None):
 
     @app.get("/api/ai/config")
     def ai_config():
-        return store.public_ai_config(store.ai_config())
+        return store.ai_config_profile()
 
     @app.put("/api/ai/config")
     def update_ai_config(body: AiConfigUpdate):
         return store.save_ai_config(body)
+
+    @app.get("/api/ai/profiles")
+    def ai_profiles():
+        return store.list_ai_profiles()
+
+    @app.post("/api/ai/profiles", status_code=201)
+    def create_ai_profile(body: AiProfileCreate):
+        return store.create_ai_profile(body)
+
+    @app.put("/api/ai/profiles/{profile_id}")
+    def update_ai_profile(profile_id: str, body: AiProfileUpdate):
+        return store.update_ai_profile(profile_id, body)
+
+    @app.delete("/api/ai/profiles/{profile_id}")
+    def delete_ai_profile(profile_id: str):
+        return store.delete_ai_profile(profile_id)
+
+    @app.post("/api/ai/profiles/{profile_id}/activate")
+    def activate_ai_profile(profile_id: str):
+        return store.activate_ai_profile(profile_id)
 
     def run_generation(generation_id: str, config):
         try:
             generation = store.update_generation(generation_id, "running")
             if generation.status == "cancelled":
                 return
+            # The provider settings are snapshotted at enqueue time. This keeps
+            # switching the active profile from changing an in-flight request.
+            config = store.generation_config(generation_id) or config
             provider = app.state.ai_provider_factory(config)
             generate = provider.generate_text if generation.mode == "agent_draw" else provider.generate_image
             result = generate(generation.request)
@@ -142,7 +165,7 @@ def create_app(data_root: Path | None = None):
         if not config.apiKey:
             raise HTTPException(409, "尚未配置 AI API Key，请在 AI 设置中填写")
         try:
-            generation = store.create_generation(body)
+            generation = store.create_generation(body, config)
         except GenerationQueueFull as error:
             raise HTTPException(429, str(error)) from error
         executor.submit(run_generation, generation.id, config)
