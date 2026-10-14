@@ -253,10 +253,32 @@ class Store:
             if not row:
                 raise KeyError("AI 配置档案不存在")
             active = conn.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
+            count = conn.execute("SELECT COUNT(*) FROM ai_provider_profiles").fetchone()[0]
+            if count <= 1:
+                raise Conflict("至少保留一个 AI 配置档案")
+            next_profile = None
             if active and active["active_id"] == profile_id:
-                raise Conflict("请先切换其他 AI 配置档案，再删除当前档案")
+                next_profile = conn.execute(
+                    "SELECT * FROM ai_provider_profiles WHERE id<>? ORDER BY created,id LIMIT 1", (profile_id,)
+                ).fetchone()
+            if next_profile is not None:
+                conn.execute(
+                    "INSERT INTO ai_provider_state(id,active_id) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET active_id=excluded.active_id",
+                    (next_profile["id"],),
+                )
+                conn.execute(
+                    "INSERT INTO ai_provider_config(id,config,updated) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated",
+                    (next_profile["config"], now()),
+                )
             conn.execute("DELETE FROM ai_provider_profiles WHERE id=?", (profile_id,))
-        return {"deleted": True, "id": profile_id}
+        result = {"deleted": True, "id": profile_id}
+        if next_profile is not None:
+            config = AiProviderConfig.model_validate_json(next_profile["config"])
+            result.update({
+                "activeId": next_profile["id"],
+                "profile": self._profile_public(next_profile["id"], next_profile["name"], config, next_profile["created"], next_profile["updated"]),
+            })
+        return result
 
     def create_generation(self, request: AiGenerationRequest, provider_config: AiProviderConfig | None = None) -> AiGeneration:
         generation_id, created = uid(), now()

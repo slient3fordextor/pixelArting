@@ -260,7 +260,9 @@ def test_ai_profiles_crud_activation_and_legacy_config(client):
     assert profile["hasApiKey"] is True
     assert "profile-secret" not in json.dumps(profile)
     assert client.post("/api/ai/profiles", json={"name": "第二服务"}).status_code == 409
-    assert client.delete("/api/ai/profiles/default").status_code == 409
+    deleted_active = client.delete("/api/ai/profiles/default")
+    assert deleted_active.status_code == 200
+    assert deleted_active.json()["activeId"] == profile["id"]
 
     activated = client.post(f"/api/ai/profiles/{profile['id']}/activate")
     assert activated.status_code == 200
@@ -274,8 +276,13 @@ def test_ai_profiles_crud_activation_and_legacy_config(client):
     assert updated.status_code == 200
     assert updated.json()["name"] == "第二服务改名"
     assert updated.json()["hasApiKey"] is False
-    assert client.delete("/api/ai/profiles/default").status_code == 200
     assert client.get("/api/ai/profiles").json()["activeId"] == profile["id"]
+
+
+def test_cannot_delete_last_ai_profile(client):
+    response = client.delete("/api/ai/profiles/default")
+    assert response.status_code == 409
+    assert "至少保留一个" in response.json()["detail"]
 
 
 def test_old_single_profile_row_is_migrated(tmp_path):
