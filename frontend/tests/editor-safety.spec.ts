@@ -1,0 +1,76 @@
+import { expect, test } from '@playwright/test';
+
+test('leaving edited assets offers cancel, save and discard and keeps failed saves open', async ({ page, request }) => {
+  const project = await (await request.post('/api/projects', { data: { name: '安全切换测试' } })).json();
+  const first = await (await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '切换 A' } })).json();
+  const second = await (await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '切换 B' } })).json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: '切换 A预览', exact: true }).click();
+  await page.getByLabel('帧基线', { exact: true }).fill('12');
+  await page.getByRole('button', { name: '切换 B预览', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '尚有未保存的修改' })).toBeVisible();
+  await page.getByRole('button', { name: '继续编辑', exact: true }).click();
+  await expect(page.getByLabel('帧基线', { exact: true })).toHaveValue('12');
+  await page.getByRole('button', { name: '切换 B预览', exact: true }).click();
+  await page.route(`**/api/assets/${first.id}/save`, route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: '保存冲突测试' }) }));
+  await page.getByRole('button', { name: '保存后继续', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('保存冲突测试');
+  await expect(page.getByRole('dialog', { name: '尚有未保存的修改' })).toBeVisible();
+  await page.unroute(`**/api/assets/${first.id}/save`);
+  await page.getByRole('button', { name: '保存后继续', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const saved = await (await request.get(`/api/assets/${first.id}`)).json();
+  expect(saved.document.frames[0].baselineY).toBe(12);
+  await page.getByLabel('帧基线', { exact: true }).fill('21');
+  await page.getByRole('button', { name: '切换 A预览', exact: true }).click();
+  await page.getByRole('button', { name: '放弃并继续', exact: true }).click();
+  expect((await (await request.get(`/api/assets/${second.id}`)).json()).document.frames[0].baselineY).toBeNull();
+  expect(await page.evaluate(id => localStorage.getItem(`pixelart-draft-v1:${id}`), second.id)).toBeNull();
+});
+
+test('project configuration including a palette being typed can be saved before leaving', async ({ page, request }) => {
+  const a = await (await request.post('/api/projects', { data: { name: '配置离开 A' } })).json();
+  const b = await (await request.post('/api/projects', { data: { name: '配置离开 B' } })).json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(a.id);
+  await page.getByRole('button', { name: '质检', exact: true }).click();
+  await page.getByLabel('项目调色板').fill('#aabbcc');
+  await page.getByLabel('项目', { exact: true }).selectOption(b.id);
+  await page.getByRole('button', { name: '保存后继续', exact: true }).click();
+  await expect(page.getByLabel('项目', { exact: true })).toHaveValue(b.id);
+  expect((await (await request.get(`/api/projects/${a.id}/check-config`)).json()).palette).toEqual(['#AABBCC']);
+});
+
+test('collision metadata persists and onion skins never change the current pixels', async ({ page, request }) => {
+  const project = await (await request.post('/api/projects', { data: { name: '帧辅助测试' } })).json();
+  const asset = await (await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '帧辅助素材', width: 32, height: 32 } })).json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  const canvas = page.getByLabel('像素编辑画布', { exact: true });
+  await expect(canvas).toHaveAttribute('aria-busy', 'false');
+  const box = await canvas.boundingBox();
+  await page.mouse.click(box!.x + box!.width * 4.5 / 32, box!.y + box!.height * 4.5 / 32);
+  await page.getByRole('button', { name: '新建空白帧', exact: true }).click();
+  await expect(canvas).toHaveAttribute('aria-busy', 'false');
+  const before = await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL());
+  await page.getByRole('button', { name: '洋葱皮预览', exact: true }).click();
+  await expect.poll(() => page.getByLabel('洋葱皮预览画布').evaluate((element: HTMLCanvasElement) => element.getContext('2d')!.getImageData(4, 4, 1, 1).data[3])).toBeGreaterThan(0);
+  expect(await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL())).toBe(before);
+  await page.getByRole('button', { name: '添加碰撞框', exact: true }).click();
+  await page.getByLabel('碰撞框 1 x', { exact: true }).fill('7');
+  await page.getByLabel('碰撞框 1 width', { exact: true }).fill('12');
+  await expect(page.locator('.collision-region')).toBeVisible();
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('.toast')).toContainText('版本已保存');
+  const saved = await (await request.get(`/api/assets/${asset.id}`)).json();
+  expect(saved.document.frames[1].collisionRects).toEqual([{ x: 7, y: 0, width: 12, height: 16 }]);
+  await page.reload();
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: '第 2 帧', exact: true }).click();
+  await expect(page.getByLabel('碰撞框 1 x', { exact: true })).toHaveValue('7');
+  await page.getByRole('button', { name: '删除碰撞框 1', exact: true }).click();
+  await expect(page.locator('.collision-region')).toHaveCount(0);
+  await page.getByRole('button', { name: '撤销', exact: true }).click();
+  await expect(page.locator('.collision-region')).toBeVisible();
+});
