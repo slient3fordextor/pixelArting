@@ -69,6 +69,37 @@ class Store:
         with self.connection() as conn:
             return [dict(row) for row in conn.execute("SELECT * FROM projects ORDER BY created")]
 
+    def rename_project(self, project_id: str, expected_name: str, name: str):
+        name = name.strip()
+        if not name or len(name) > 80:
+            raise ValueError("项目名称必须为 1 到 80 个字符")
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+            if not row:
+                raise KeyError("项目不存在")
+            if row["name"] != expected_name:
+                raise Conflict("项目名称已变化，请刷新后再重命名")
+            conn.execute("UPDATE projects SET name=? WHERE id=?", (name, project_id))
+            return {**dict(row), "name": name}
+
+    def delete_project(self, project_id: str, expected_name: str, expected_versions: dict[str, str]):
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            project = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
+            if not project:
+                raise KeyError("项目不存在")
+            if project["name"] != expected_name:
+                raise Conflict("项目名称已变化，请刷新后再删除")
+            current_versions = {row["id"]: row["current_version"] for row in conn.execute("SELECT id,current_version FROM assets WHERE project_id=?", (project_id,))}
+            if current_versions != expected_versions:
+                raise Conflict("项目素材或版本已变化，请刷新后重新确认删除")
+            for table in ("previews", "reports", "versions"):
+                conn.execute(f"DELETE FROM {table} WHERE asset_id IN (SELECT id FROM assets WHERE project_id=?)", (project_id,))
+            conn.execute("DELETE FROM assets WHERE project_id=?", (project_id,))
+            conn.execute("DELETE FROM project_configs WHERE project_id=?", (project_id,))
+            conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+
     def project_config(self, project_id: str) -> CheckConfig:
         with self.connection() as conn:
             row = conn.execute(

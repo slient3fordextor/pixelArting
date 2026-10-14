@@ -10,7 +10,7 @@ from PIL import Image
 
 from .exports import export_bundle
 from .images import MAX_UPLOAD_BYTES, composite, decode_png, encode_image, png_bytes
-from .models import BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RestoreRequest, SaveRequest
+from .models import BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
 from .quality import inspect
 from .repairs import repair
 from .sample import sample_document
@@ -63,6 +63,15 @@ def create_app(data_root: Path | None = None):
     @app.post("/api/projects", status_code=201)
     def project(body: ProjectCreate):
         return store.project(body.name)
+
+    @app.put("/api/projects/{project_id}")
+    def rename_project(project_id: str, body: RenameProjectRequest):
+        return store.rename_project(project_id, body.expectedName, body.name)
+
+    @app.delete("/api/projects/{project_id}")
+    def delete_project(project_id: str, body: DeleteProjectRequest):
+        store.delete_project(project_id, body.expectedName, body.expectedCurrentVersions)
+        return {"deleted": True, "projectId": project_id}
 
     @app.get("/api/projects/{project_id}/check-config")
     def project_config(project_id: str):

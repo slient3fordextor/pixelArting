@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Model(BaseModel):
@@ -168,6 +168,21 @@ class CommitRequest(Model):
 
 class ProjectCreate(Model):
     name: str = Field(min_length=1, max_length=80)
+
+
+class RenameProjectRequest(Model):
+    name: str = Field(min_length=1, max_length=80)
+    expectedName: str = Field(min_length=1, max_length=80)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class DeleteProjectRequest(Model):
+    expectedName: str = Field(min_length=1, max_length=80)
+    expectedCurrentVersions: dict[str, str] = Field(max_length=10000)
 
 
 class BlankAssetCreate(Model):
