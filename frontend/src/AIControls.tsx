@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, CircleStop, Download, LoaderCircle, RefreshCw, Settings2, Sparkles, X } from 'lucide-react';
+import { Check, CircleStop, Download, LoaderCircle, RefreshCw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
 import { api } from './api';
 import type { Asset } from './types';
 
@@ -78,6 +78,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const localBusy = useRef(false);
+  const pendingHistoryUpdates = useRef<Set<string> | null>(null);
 
   const candidates = task?.result?.candidates || [];
   const selectedModel = mode === 'agent_draw' ? textModel : imageModel;
@@ -108,12 +109,25 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   useEffect(() => {
     if (!open || !projectId) return;
     let cancelled = false;
+    const updatedIds = new Set<string>();
+    pendingHistoryUpdates.current = updatedIds;
     api<Generation[]>(`/ai/generations?projectId=${encodeURIComponent(projectId)}&limit=20`).then(list => {
       if (cancelled) return;
-      setHistory(list);
-      setTask(current => current || list[0] || null);
+      // Requests started earlier must not overwrite tasks updated while they were pending.
+      setHistory(current => {
+        const latest = current.filter(item => updatedIds.has(item.id));
+        const latestIds = new Set(latest.map(item => item.id));
+        const incoming = Array.from(new Map(list.map(item => [item.id, item])).values()).filter(item => !latestIds.has(item.id));
+        const receivedIds = new Set([...latest, ...incoming].map(item => item.id));
+        return [...latest, ...incoming, ...current.filter(item => !receivedIds.has(item.id))];
+      });
+      setTask(current => current && updatedIds.has(current.id) ? current : list.find(item => item.id === current?.id) || current || list[0] || null);
+      if (pendingHistoryUpdates.current === updatedIds) pendingHistoryUpdates.current = null;
     }).catch(error => { if (!cancelled) setNotice({ text: error instanceof Error ? error.message : '无法读取生成记录', error: true }); });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (pendingHistoryUpdates.current === updatedIds) pendingHistoryUpdates.current = null;
+    };
   }, [open, projectId]);
 
   useEffect(() => {
@@ -139,6 +153,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   }, [task?.id, taskActive]);
 
   function updateTask(next: Generation) {
+    pendingHistoryUpdates.current?.add(next.id);
     setTask(next); setHistory(list => [next, ...list.filter(item => item.id !== next.id)]);
   }
 
@@ -187,6 +202,17 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
       updateTask(next);
       if (next.status === 'succeeded') setNotice({ text: '候选已生成，请选择要导入的结果' });
     } catch (error) { setNotice({ text: error instanceof Error ? error.message : '生成请求失败', error: true }); }
+    finally { setWorking(false); }
+  }
+
+  async function clearApiKey() {
+    if (working || !config?.hasApiKey) return;
+    setWorking(true); setNotice(null);
+    try {
+      const next = await api<AiConfig>('/ai/config', { clearApiKey: true }, 'PUT');
+      setConfig(next); setApiKey('');
+      setNotice({ text: '已删除保存的 API Key' });
+    } catch (error) { setNotice({ text: error instanceof Error ? error.message : 'API Key 删除失败', error: true }); }
     finally { setWorking(false); }
   }
 
@@ -239,7 +265,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
       <section ref={dialogRef} className={`modal ai-modal ${candidates.length ? 'has-candidates' : ''}`} role="dialog" aria-modal="true" aria-labelledby="ai-generation-title" onKeyDown={event => {
         if (event.key === 'Escape') { event.stopPropagation(); event.preventDefault(); close(); }
         if (event.key === 'Tab') {
-          const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), summary')).filter(item => item.offsetParent !== null);
+          const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary')).filter(item => item.offsetParent !== null);
           const edge = event.shiftKey ? items[0] : items.at(-1);
           if (event.target === edge) { event.preventDefault(); (event.shiftKey ? items.at(-1) : items[0])?.focus(); }
         }
@@ -256,7 +282,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
           <summary><Settings2 size={15} />连接设置<small>{config?.hasApiKey ? '密钥已配置' : '密钥未配置'}</small></summary>
           <div className="ai-settings-fields">
             <label className="field-label">OpenAI-compatible Base URL<input aria-label="AI Base URL" type="url" value={baseUrl} placeholder="https://api.openai.com/v1" onChange={event => setBaseUrl(event.target.value)} /></label>
-            <label className="field-label">API Key<input aria-label="AI API Key" type="password" autoComplete="off" value={apiKey} placeholder={config?.hasApiKey ? '已配置，留空则保持不变' : '输入你的 API Key'} onChange={event => setApiKey(event.target.value)} /></label>
+            <label className="field-label">API Key<div className="inline-tools"><input aria-label="AI API Key" type="password" autoComplete="off" value={apiKey} placeholder={config?.hasApiKey ? '已配置，留空则保持不变' : '输入你的 API Key'} onChange={event => setApiKey(event.target.value)} /><button className="icon-button" type="button" title="删除已保存 API Key" aria-label="删除已保存 API Key" disabled={working || !config?.hasApiKey} onClick={() => void clearApiKey()}><Trash2 size={17} /></button></div></label>
             <div className="property-grid">
               <label>文本模型<input aria-label="AI 文本模型" value={textModel} onChange={event => setTextModel(event.target.value)} /></label>
               <label>图像模型<input aria-label="AI 图像模型" value={imageModel} onChange={event => setImageModel(event.target.value)} /></label>
