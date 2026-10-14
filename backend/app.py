@@ -188,9 +188,22 @@ def create_app(data_root: Path | None = None):
         changes = []
         for old, new in zip(document.frames, result.frames):
             before, after = np.array(composite(document, old)), np.array(composite(result, new))
-            changed = int(np.any(before != after, axis=2).sum()) if before.shape == after.shape else None
-            changes.append({"frameId": old.id, "changedPixels": changed, "before": [old.width, old.height], "after": [new.width, new.height]})
-        return {"previewId": preview_id, "document": result, "changes": changes, "report": inspect(result, config)}
+            height, width = max(old.height, new.height), max(old.width, new.width)
+            old_pixels = np.zeros((height, width, 4), dtype=np.uint8)
+            new_pixels = np.zeros_like(old_pixels)
+            old_pixels[:old.height, :old.width] = before
+            new_pixels[:new.height, :new.width] = after
+            mask = np.any(old_pixels != new_pixels, axis=2)
+            ys, xs = np.nonzero(mask)
+            bounds = {"x": int(xs.min()), "y": int(ys.min()), "width": int(xs.max() - xs.min() + 1), "height": int(ys.max() - ys.min() + 1)} if len(xs) else None
+            metadata_before = {"origin": old.origin.model_dump() if old.origin else None, "baselineY": old.baselineY, "collisionRects": [rect.model_dump() for rect in old.collisionRects]}
+            metadata_after = {"origin": new.origin.model_dump() if new.origin else None, "baselineY": new.baselineY, "collisionRects": [rect.model_dump() for rect in new.collisionRects]}
+            changes.append({
+                "frameId": old.id, "changedPixels": int(mask.sum()), "before": [old.width, old.height], "after": [new.width, new.height],
+                "changedBounds": bounds, "metadataBefore": metadata_before, "metadataAfter": metadata_after,
+                "metadataChanged": metadata_before != metadata_after,
+            })
+        return {"previewId": preview_id, "baseVersionId": body.versionId, "actions": [action.model_dump() for action in body.actions], "document": result, "changes": changes, "report": inspect(result, config)}
 
     @app.post("/api/assets/{asset_id}/commit")
     def commit(asset_id: str, body: CommitRequest):
