@@ -1,7 +1,10 @@
-const { app, BrowserWindow, dialog, Menu, screen } = require('electron');
+const { app, BrowserWindow, dialog, Menu, net, protocol, screen } = require('electron');
 const { existsSync } = require('node:fs');
 const path = require('node:path');
 const { startBackend } = require('./backend.cjs');
+const { DESKTOP_SCHEME, DESKTOP_URL, createProtocolHandler } = require('./protocol.cjs');
+
+protocol.registerSchemesAsPrivileged([{ scheme: DESKTOP_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 
 app.setName('PixelArting');
 if (process.env.PIXELART_DESKTOP_USER_DATA) app.setPath('userData', process.env.PIXELART_DESKTOP_USER_DATA);
@@ -70,9 +73,10 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     if (!existsSync(path.join(root, 'frontend/dist/index.html'))) throw new Error('请先运行 npm --prefix frontend run build。');
-    backend = await startBackend({ root, dataRoot: process.env.PIXELART_DATA_DIR, onExit: error => {
+    backend = await startBackend({ root, dataRoot: process.env.PIXELART_DATA_DIR, portFile: path.join(app.getPath('userData'), 'backend-port'), onExit: error => {
       if (!closing) { dialog.showErrorBox('PixelArting 本地服务', error.message); mainWindow?.destroy(); }
     } });
+    protocol.handle(DESKTOP_SCHEME, createProtocolHandler(backend.url, (url, options) => net.fetch(url, options)));
     const area = screen.getPrimaryDisplay().workAreaSize;
     mainWindow = new BrowserWindow({
       title: 'PixelArting', width: Math.min(1440, area.width), height: Math.min(1000, area.height),
@@ -95,7 +99,8 @@ if (!app.requestSingleInstanceLock()) {
       item.setSaveDialogOptions({ title: '导出素材', defaultPath: path.join(app.getPath('downloads'), item.getFilename()) });
     });
     mainWindow.webContents.on('will-navigate', (event, url) => {
-      if (new URL(url).origin !== backend.url) event.preventDefault();
+      const target = new URL(url);
+      if (target.protocol !== `${DESKTOP_SCHEME}:` || target.host !== 'workbench') event.preventDefault();
     });
     mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
       callback({ responseHeaders: {
@@ -111,7 +116,7 @@ if (!app.requestSingleInstanceLock()) {
       if (result === 1) event.preventDefault();
     });
     mainWindow.once('ready-to-show', () => mainWindow.show());
-    await mainWindow.loadURL(backend.url);
+    await mainWindow.loadURL(DESKTOP_URL);
   }).catch(async error => {
     dialog.showErrorBox('PixelArting 启动失败', error.message);
     closing = true;

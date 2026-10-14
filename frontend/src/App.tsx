@@ -325,9 +325,10 @@ export default function App() {
     setMenu(null);
   }
 
-  async function exportAsset(item: AssetItem, target: 'png' | 'json') {
+  async function exportAsset(item: AssetItem, target: 'png' | 'json', frameId?: string) {
     if (item.id === asset?.id && dirty) { setNotice({ message: '当前素材有未保存编辑，请先保存再导出', error: true }); return; }
-    const response = await fetch(`/api/assets/${item.id}/export?versionId=${item.currentVersionId}&target=${target}`);
+    const selectedFrame = target === 'png' && frameId ? `&frameId=${encodeURIComponent(frameId)}` : '';
+    const response = await fetch(`/api/assets/${item.id}/export?versionId=${item.currentVersionId}&target=${target}${selectedFrame}`);
     if (!response.ok) throw new Error((await response.json()).detail || '导出失败');
     const url = URL.createObjectURL(await response.blob());
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = `${item.name}.${target === 'png' ? 'png' : 'zip'}`; anchor.click();
@@ -648,7 +649,7 @@ export default function App() {
       { label: '重命名素材', icon: Pencil, disabled: locked, action: () => beginRename(item) },
       null, { label: '复制素材', icon: Copy, disabled: locked, action: () => run(() => copyAsset(item)) },
       { label: '创建副本', icon: CopyPlus, disabled: locked || !projectId, action: () => run(() => duplicateAsset(item)) },
-      null, { label: '导出当前帧 PNG', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'png')) },
+      null, { label: '导出当前帧 PNG', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'png', item.id === asset?.id ? frame?.id : undefined)) },
       { label: '导出分层 PNG + JSON', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'json')) },
       { label: '查看版本', icon: History, disabled: locked, action: () => run(async () => { await switchAsset(item.id); setTab('versions'); }) },
       null, { label: '删除素材', icon: Trash2, danger: true, disabled: locked, action: () => deleteAsset(item) },
