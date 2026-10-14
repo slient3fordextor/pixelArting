@@ -365,10 +365,10 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
           <summary><Settings2 size={15} />连接设置<small>{config?.hasApiKey ? '密钥已配置' : '密钥未配置'}</small></summary>
           <div className="ai-settings-fields">
             {profileApiAvailable ? <div className="ai-profiles">
-              <label className="field-label">模型档案<select aria-label="AI 模型档案" value={activeProfileId} disabled={working || taskActive} onChange={event => void activateProfile(event.target.value)}>
+              <label className="field-label profile-field-label">模型档案<span className="profile-select-shell"><select className="profile-select" aria-label="AI 模型档案" value={activeProfileId} disabled={working || taskActive} onChange={event => void activateProfile(event.target.value)}>
                 {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}{profile.hasApiKey ? ' · 已配置' : ' · 未配置'}</option>)}
-              </select></label>
-              <div className="profile-name-tools"><label className="field-label">档案名称<input aria-label="AI 档案名称" value={profileName} disabled={working || taskActive} onChange={event => setProfileName(event.target.value)} /></label><button className="icon-button" type="button" title="新建模型档案" aria-label="新建模型档案" disabled={working || taskActive || configChanged} onClick={() => void createProfile()}><CopyPlus size={16} /></button></div>
+              </select></span></label>
+              <div className="profile-name-tools"><label className="field-label profile-name-label">档案名称<input className="profile-name-input" aria-label="AI 档案名称" value={profileName} disabled={working || taskActive} onChange={event => setProfileName(event.target.value)} /></label><button className="icon-button profile-add-button" type="button" title="新建模型档案" aria-label="新建模型档案" disabled={working || taskActive || configChanged} onClick={() => void createProfile()}><CopyPlus size={16} /></button></div>
               {profiles.some(item => item.id !== activeProfileId) ? <div className="profile-delete-tools" aria-label="可删除的模型档案">{profiles.filter(item => item.id !== activeProfileId).map(profile => <button className="icon-button" key={profile.id} type="button" title={`删除模型档案 ${profile.name}`} aria-label={`删除模型档案 ${profile.name}`} disabled={working || taskActive} onClick={() => void deleteProfile(profile)}><Trash2 size={15} /></button>)}</div> : null}
             </div> : null}
             <label className="field-label">OpenAI-compatible Base URL<input aria-label="AI Base URL" type="url" value={baseUrl} placeholder="https://api.openai.com/v1" onChange={event => setBaseUrl(event.target.value)} /></label>
