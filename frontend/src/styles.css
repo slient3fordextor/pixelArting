@@ -116,7 +116,14 @@ small { font-size: 11px; color: #8a909a; font-weight: 400; }
 .animation-controls > label { display: flex; align-items: center; gap: 5px; color: #979da5; }
 .animation-controls input { max-width: 66px; font-size: 11px; padding: 5px 7px !important; }
 .animation-controls .button { font-size: 11px; min-height: 30px; padding: 5px 10px; }
+.animation-controls .loop-toggle { white-space: nowrap; }
+.animation-controls .loop-toggle input { width: 14px; height: 14px; margin: 0; }
 .mapping-count { font-size: 10px; color: #929aa4; }
+.animation-sequence { display: flex; gap: 6px; overflow-x: auto; padding: 8px 1px 1px; }
+.animation-step { width: 76px; height: 59px; display: flex; flex-direction: column; align-items: center; gap: 3px; flex-shrink: 0; padding: 4px; border: 1px solid #e0e5e9; border-radius: 4px; background: #f8f9fa; }
+.animation-step.selected { border-color: #218f83; background: #edf7f1; }
+.animation-step canvas { width: 32px; height: 32px; object-fit: contain; image-rendering: pixelated; }
+.animation-step span { white-space: nowrap; font-size: 9px; color: #647873; }
 .inspector { border-left: 1px solid #e1e4e7; background: #fff; min-height: 0; overflow-y: auto; }
 .panel-tabs { height: 49px; display: flex; border-bottom: 1px solid #e2e5e8; padding: 0 10px; position: sticky; top: 0; background: white; z-index: 2; }
 .panel-tabs button { display: flex; justify-content: center; align-items: center; gap: 6px; flex: 1; font-size: 11px; color: #9098a2; border-bottom: 2px solid transparent; }

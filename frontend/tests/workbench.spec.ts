@@ -469,3 +469,119 @@ test('frame timeline switches frames and previews unassigned sequences', async (
   await expect.poll(() => page.locator('.frame-item.selected').getAttribute('aria-label'), { timeout: 1000 }).toBe('第 2 帧');
   await page.getByRole('button', { name: '暂停', exact: true }).click();
 });
+
+test('animation sequences keep independent order, loop settings and blank frame pixels', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  await expect(page.getByLabel('像素编辑画布')).toBeVisible();
+  await page.getByRole('button', { name: '新建素材', exact: true }).first().click();
+  await page.getByLabel('素材名称').fill('独立动作编排');
+  await page.getByRole('button', { name: '创建素材', exact: true }).click();
+  await page.getByRole('button', { name: '新建图层', exact: true }).click();
+  const canvas = page.getByLabel('像素编辑画布');
+  const rect = await canvas.boundingBox();
+  await page.mouse.click(rect!.x + rect!.width * 8.5 / 64, rect!.y + rect!.height * 8.5 / 64);
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => element.getContext('2d')!.getImageData(8, 8, 1, 1).data[3])).toBe(255);
+
+  await page.getByRole('button', { name: '新建空白帧', exact: true }).click();
+  await expect(page.locator('.frame-item')).toHaveCount(2);
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => {
+    const pixels = element.getContext('2d')!.getImageData(0, 0, element.width, element.height).data;
+    return pixels.some((value, index) => index % 4 === 3 && value > 0);
+  })).toBe(false);
+  await page.getByRole('button', { name: '新建空白帧', exact: true }).click();
+  await expect(page.locator('.frame-item')).toHaveCount(3);
+
+  for (const [index, duration] of [[1, 60], [0, 80], [2, 40]]) {
+    await page.locator('.frame-item').nth(index).click();
+    await page.getByLabel('帧时长').fill(String(duration));
+    await page.getByRole('button', { name: '加入动画', exact: true }).click();
+  }
+  await expect(page.locator('.animation-step')).toHaveCount(3);
+  await expect(page.locator('.animation-step').first()).toHaveAttribute('aria-label', '动作第 1 帧（素材帧 2）');
+  await page.getByRole('button', { name: '动作帧前移', exact: true }).click();
+  await expect(page.locator('.animation-step').nth(1)).toHaveAttribute('aria-label', '动作第 2 帧（素材帧 3）');
+  await expect(page.locator('.animation-step').nth(2)).toHaveAttribute('aria-label', '动作第 3 帧（素材帧 1）');
+
+  await page.locator('.frame-item').first().click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '帧后移', exact: true }).click();
+  await expect(page.locator('.animation-step').first()).toHaveAttribute('aria-label', '动作第 1 帧（素材帧 1）');
+  await expect(page.locator('.animation-step').nth(1)).toHaveAttribute('aria-label', '动作第 2 帧（素材帧 3）');
+  await expect(page.locator('.animation-step').nth(2)).toHaveAttribute('aria-label', '动作第 3 帧（素材帧 2）');
+  await page.getByLabel('循环播放').uncheck();
+  await page.getByRole('button', { name: '播放动画', exact: true }).click();
+  await expect(page.getByRole('button', { name: '播放动画', exact: true })).toBeVisible();
+  await expect(page.locator('.frame-item.selected')).toHaveAttribute('aria-label', '第 2 帧');
+
+  await page.getByLabel('动作', { exact: true }).selectOption('walk');
+  await page.getByLabel('方向', { exact: true }).selectOption('left');
+  await page.getByRole('button', { name: '加入全部帧', exact: true }).click();
+  await expect(page.locator('.animation-step')).toHaveCount(3);
+  await expect(page.getByRole('button', { name: '加入全部帧', exact: true })).toBeDisabled();
+  await page.getByLabel('动作', { exact: true }).selectOption('idle');
+  await page.getByLabel('方向', { exact: true }).selectOption('down');
+  await expect(page.getByLabel('循环播放')).not.toBeChecked();
+
+  const saved = page.waitForResponse(response => response.url().endsWith('/save') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const asset = await (await saved).json();
+  const idle = asset.document.animations.find((animation: { action: string; direction: string }) => animation.action === 'idle' && animation.direction === 'down');
+  const walk = asset.document.animations.find((animation: { action: string; direction: string }) => animation.action === 'walk' && animation.direction === 'left');
+  expect(idle.loop).toBe(false);
+  expect(idle.frames.map((ref: { frameId: string }) => ref.frameId)).toEqual([asset.document.frames[0].id, asset.document.frames[2].id, asset.document.frames[1].id]);
+  expect(walk.frames.map((ref: { frameId: string }) => ref.frameId)).toEqual(asset.document.frames.map((frame: { id: string }) => frame.id));
+  expect(asset.document.frames.every((frame: { pixels: Record<string, string> }) => Object.keys(frame.pixels).length === 2)).toBe(true);
+  await page.reload();
+  await expect(page.locator('.animation-step')).toHaveCount(3);
+  await expect(page.getByLabel('循环播放')).not.toBeChecked();
+  await page.screenshot({ path: '/tmp/pixelarting-independent-animation.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: '/tmp/pixelarting-independent-animation-mobile.png', fullPage: true });
+});
+
+test('removing animation references and deleting actions preserve source frames and other actions', async ({ page, request }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  await expect(page.getByLabel('像素编辑画布')).toBeVisible();
+  await page.getByRole('button', { name: '新建素材', exact: true }).first().click();
+  await page.getByLabel('素材名称').fill('动作引用管理');
+  await page.getByRole('button', { name: '创建素材', exact: true }).click();
+  const projects = await (await request.get('/api/projects')).json();
+  const assets = await (await request.get(`/api/projects/${projects[0].id}/assets`)).json();
+  const item = assets.find((candidate: { name: string }) => candidate.name === '动作引用管理');
+  const source = await (await request.get(`/api/assets/${item.id}`)).json();
+  source.document.type = 'character';
+  source.document.animations = [
+    { action: 'idle', direction: 'down', loop: true, frames: [{ frameId: 'frame_0', durationMs: 150 }, { frameId: 'frame_0', durationMs: 400 }] },
+    { action: 'walk', direction: 'down', loop: true, frames: [{ frameId: 'frame_0', durationMs: 200 }] },
+  ];
+  expect((await request.post(`/api/assets/${item.id}/save`, { data: { expectedCurrentVersionId: source.currentVersionId, document: source.document } })).ok()).toBe(true);
+  await page.reload();
+  await expect(page.locator('.animation-step')).toHaveCount(2);
+  await page.locator('.animation-step').nth(1).click();
+  await expect(page.getByLabel('帧时长')).toHaveValue('400');
+  await page.getByLabel('帧时长').fill('50');
+  await page.getByRole('button', { name: '更新时长', exact: true }).click();
+  await expect(page.locator('.animation-step').first()).toContainText('150 ms');
+  await expect(page.locator('.animation-step').nth(1)).toContainText('50 ms');
+  await page.getByRole('button', { name: '移除当前帧', exact: true }).click();
+  await expect(page.locator('.animation-step')).toHaveCount(1);
+  await expect(page.locator('.animation-step').first()).toContainText('150 ms');
+  await expect(page.locator('.frame-item')).toHaveCount(1);
+  await page.getByRole('button', { name: '删除当前动画', exact: true }).click();
+  await expect(page.locator('.animation-step')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '删除当前动画', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '撤销', exact: true }).click();
+  await expect(page.locator('.animation-step')).toHaveCount(1);
+  await page.getByRole('button', { name: '重做', exact: true }).click();
+  await expect(page.locator('.animation-step')).toHaveCount(0);
+  await page.getByLabel('动作', { exact: true }).selectOption('walk');
+  await expect(page.locator('.animation-step')).toHaveCount(1);
+  await expect(page.locator('.animation-step').first()).toContainText('200 ms');
+  const saved = page.waitForResponse(response => response.url().endsWith('/save') && response.request().method() === 'POST');
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  const result = await (await saved).json();
+  expect(result.document.frames).toEqual(source.document.frames);
+  expect(result.document.animations).toEqual([source.document.animations[1]]);
+});
