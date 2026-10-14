@@ -1,0 +1,46 @@
+import { expect, test } from '@playwright/test';
+
+test('sheet preview, mapping and unsaved confirmation integrate with the editor', async ({ page, request }) => {
+  const project = await (await request.post('/api/projects', { data: { name: '切片闭环测试' } })).json();
+  await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '导入前素材' } });
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByLabel('帧基线').fill('12');
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement('canvas'); canvas.width = 19; canvas.height = 10;
+    const context = canvas.getContext('2d')!;
+    context.fillStyle = '#ff0000'; context.fillRect(1, 1, 8, 8);
+    context.fillStyle = '#00ff00'; context.fillRect(10, 1, 8, 8);
+    return canvas.toDataURL().split(',')[1];
+  });
+  await page.getByRole('button', { name: '上传 PNG 或 Sprite Sheet', exact: true }).click();
+  await page.getByLabel('PNG 文件', { exact: true }).setInputFiles({ name: '映射切片.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') });
+  await page.getByRole('radio', { name: 'Sprite Sheet', exact: true }).check();
+  await page.getByLabel('单帧宽度').fill('8'); await page.getByLabel('单帧高度').fill('8');
+  await page.getByLabel('左右边距').fill('1'); await page.getByLabel('上下边距').fill('1');
+  await page.getByLabel('水平间距').fill('1');
+  await page.getByRole('button', { name: '预览切分', exact: true }).click();
+  await expect(page.getByRole('region', { name: '切分预览' })).toBeVisible();
+  expect((await (await request.get(`/api/projects/${project.id}/assets`)).json()).length).toBe(1);
+  await page.getByLabel('第 1 行动作方向').selectOption('walk:down');
+  await page.getByLabel('统一帧时长').fill('120');
+  await page.getByRole('checkbox', { name: '确认动作与方向映射' }).check();
+  await page.getByRole('button', { name: '确认导入', exact: true }).click();
+  await page.getByRole('button', { name: '继续编辑', exact: true }).click();
+  await expect(page.getByRole('region', { name: '切分预览' })).toBeVisible();
+  await expect(page.getByLabel('第 1 行动作方向')).toHaveValue('walk:down');
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: '/tmp/pixelarting-integrated-import-mobile.png', fullPage: true });
+  await page.getByRole('button', { name: '确认导入', exact: true }).click();
+  await page.getByRole('button', { name: '保存后继续', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('.document-bar')).toContainText('映射切片');
+  await expect(page.getByRole('button', { name: '第 2 帧', exact: true })).toBeVisible();
+  await expect(page.getByLabel('动作', { exact: true })).toHaveValue('walk');
+  await expect(page.getByLabel('帧时长')).toHaveValue('120');
+  const canvas = page.getByLabel('像素编辑画布', { exact: true });
+  await expect.poll(() => canvas.evaluate((el: HTMLCanvasElement) => Array.from(el.getContext('2d')!.getImageData(0, 0, 1, 1).data))).toEqual([255, 0, 0, 255]);
+  await page.getByRole('button', { name: '第 2 帧', exact: true }).click();
+  await expect.poll(() => canvas.evaluate((el: HTMLCanvasElement) => Array.from(el.getContext('2d')!.getImageData(0, 0, 1, 1).data))).toEqual([0, 255, 0, 255]);
+});

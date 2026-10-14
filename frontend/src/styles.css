@@ -6,7 +6,7 @@ button, summary, select, input[type='checkbox'], input[type='range'], input[type
 button { color: inherit; border: 0; background: none; }
 button:disabled, .disabled { opacity: .42; cursor: default; }
 button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #269b89; outline-offset: 2px; }
-input:not([type='checkbox']):not([type='range']):not([type='color']):not([type='file']), select, textarea { border: 1px solid #dde0e4; border-radius: 4px; background: #fff; color: #30353d; padding: 7px 9px; min-width: 0; width: 100%; }
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']), select, textarea { border: 1px solid #dde0e4; border-radius: 4px; background: #fff; color: #30353d; padding: 7px 9px; min-width: 0; width: 100%; }
 input[type='checkbox'], input[type='range'] { accent-color: #218f83; }
 textarea { resize: vertical; }
 small { font-size: 11px; color: #8a909a; font-weight: 400; }
@@ -189,6 +189,7 @@ select.full { margin-bottom: 10px; }
 .context-separator { border-top: 1px solid #e9edef; margin: 4px 3px; }
 .modal-backdrop { position: fixed; inset: 0; background: #202a3947; z-index: 20; display: flex; justify-content: center; align-items: center; padding: 20px; }
 .modal { width: 390px; max-height: calc(100dvh - 40px); overflow: auto; background: white; border: 1px solid #e3e7eb; border-radius: 7px; padding: 22px; box-shadow: 0 10px 60px #17212b29; }
+.modal.import-modal { width: 550px; max-width: 100%; }
 .modal-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
 .modal h2 { font-size: 16px; font-weight: 600; margin: 0; }
 .upload-zone { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; border: 1px dashed #b9cec5; background: #f7fbf9; border-radius: 5px; padding: 27px 14px; color: #698277; overflow: hidden; }
