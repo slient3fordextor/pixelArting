@@ -6,7 +6,7 @@ button, summary, select, input[type='checkbox'], input[type='range'], input[type
 button { color: inherit; border: 0; background: none; }
 button:disabled, .disabled { opacity: .42; cursor: default; }
 button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #269b89; outline-offset: 2px; }
-input:not([type='checkbox']):not([type='range']):not([type='color']):not([type='file']), select, textarea { border: 1px solid #dde0e4; border-radius: 4px; background: #fff; color: #30353d; padding: 7px 9px; min-width: 0; width: 100%; }
+input:not([type='checkbox']):not([type='radio']):not([type='range']):not([type='color']):not([type='file']), select, textarea { border: 1px solid #dde0e4; border-radius: 4px; background: #fff; color: #30353d; padding: 7px 9px; min-width: 0; width: 100%; }
 input[type='checkbox'], input[type='range'] { accent-color: #218f83; }
 textarea { resize: vertical; }
 small { font-size: 11px; color: #8a909a; font-weight: 400; }

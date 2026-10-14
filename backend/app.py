@@ -1,4 +1,3 @@
-import hashlib
 import os
 from pathlib import Path
 
@@ -9,7 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from .exports import export_bundle
-from .images import MAX_UPLOAD_BYTES, composite, decode_png, encode_image, png_bytes
+from .images import MAX_UPLOAD_BYTES, composite, encode_image, png_bytes
+from .imports import SheetLayout, imported_document, preview_import, retain_png
 from .models import BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RestoreRequest, SaveRequest
 from .quality import inspect
 from .repairs import repair
@@ -108,28 +108,32 @@ def create_app(data_root: Path | None = None):
             source = store.document(body.sourceAssetId, source_version)
         return store.copy_asset(project_id, source, body.sourceAssetId, source_version)
 
+    async def read_import_source(project_id: str, file: UploadFile):
+        with store.connection() as connection:
+            if not connection.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
+                raise KeyError("项目不存在")
+        return retain_png(store.root, await file.read(MAX_UPLOAD_BYTES + 1))
+
+    @app.post("/api/projects/{project_id}/imports/preview")
+    async def import_preview(project_id: str, file: UploadFile = File(...), cellWidth: int = Form(0), cellHeight: int = Form(0), marginX: int = Form(0), marginY: int = Form(0), spacingX: int = Form(0), spacingY: int = Form(0), rows: int = Form(0), columns: int = Form(0)):
+        """预览行优先切分，不创建素材。marginX/Y 是左右/上下的对称边距，
+        spacingX/Y 是单帧间距，rows/columns 为 0 时自动推算；布局必须精确覆盖 PNG。
+        校验通过的原始 PNG 会保留到 sources/<sha256>.png，即使随后布局检查失败。
+        """
+        image, digest = await read_import_source(project_id, file)
+        layout = SheetLayout(cellWidth=cellWidth, cellHeight=cellHeight, marginX=marginX, marginY=marginY, spacingX=spacingX, spacingY=spacingY, rows=rows, columns=columns)
+        return preview_import(image, layout, digest)
+
     @app.post("/api/projects/{project_id}/assets", status_code=201)
-    async def upload(project_id: str, file: UploadFile = File(...), name: str = Form(""), cellWidth: int = Form(0), cellHeight: int = Form(0)):
-        data = await file.read(MAX_UPLOAD_BYTES + 1)
-        image = decode_png(data, max_side=2048)
-        if cellWidth or cellHeight:
-            if not (1 <= cellWidth <= 512 and 1 <= cellHeight <= 512) or image.width % cellWidth or image.height % cellHeight:
-                raise ValueError("Sprite Sheet 必须可被单帧宽高完整切分")
-            count = image.width // cellWidth * (image.height // cellHeight)
-            if count > 64:
-                raise ValueError("首版单个素材最多 64 帧")
-            parts = [image.crop((x, y, x + cellWidth, y + cellHeight)) for y in range(0, image.height, cellHeight) for x in range(0, image.width, cellWidth)]
-        else:
-            if image.width > 512 or image.height > 512:
-                raise ValueError("单图最大 512×512；更大的 Sheet 请明确单帧尺寸")
-            parts = [image]
-        source_id = hashlib.sha256(data).hexdigest()
-        source_dir = store.root / "sources"
-        source_dir.mkdir(exist_ok=True)
-        source = source_dir / f"{source_id}.png"
-        if not source.exists():
-            source.write_bytes(data)
-        document = Document(name=name.strip() or Path(file.filename or "素材.png").stem[:100] or "素材", layers=[Layer(id="base", name="原始图层")], frames=[Frame(id=f"frame_{i}", width=part.width, height=part.height, pixels={"base": encode_image(part)}) for i, part in enumerate(parts)], provenance={"kind": "upload", "originalRef": f"sources/{source_id}.png", "originalChecksum": source_id, "licenseStatus": "unknown"})
+    async def upload(project_id: str, file: UploadFile = File(...), name: str = Form(""), cellWidth: int = Form(0), cellHeight: int = Form(0), marginX: int = Form(0), marginY: int = Form(0), spacingX: int = Form(0), spacingY: int = Form(0), rows: int = Form(0), columns: int = Form(0), mapping: str = Form("[]"), mappingConfirmed: bool = Form(False)):
+        """确认导入。布局参数与 imports/preview 相同。mapping 是 JSON 数组，
+        每项包含从 0 开始的 frameIndex、action(idle/walk)、direction(down/left/right/up)，
+        以及可选 durationMs(默认 200)。非空映射必须传 mappingConfirmed=true，
+        同一动作方向按原 PNG 行优先帧序组成动画；未映射帧仍保留。
+        """
+        image, digest = await read_import_source(project_id, file)
+        layout = SheetLayout(cellWidth=cellWidth, cellHeight=cellHeight, marginX=marginX, marginY=marginY, spacingX=spacingX, spacingY=spacingY, rows=rows, columns=columns)
+        document = imported_document(image, layout, digest, file.filename, name, mapping, mappingConfirmed)
         return store.create_asset(project_id, document)
 
     @app.get("/api/assets/{asset_id}")
