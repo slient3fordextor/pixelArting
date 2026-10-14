@@ -18,6 +18,7 @@ type Props = {
   locked?: boolean;
   onRestore: (asset: Asset) => void;
   beforeRestore?: () => Promise<boolean>;
+  onBusyChange?: (busy: boolean) => void;
 };
 type HistoricReport = Report & { created?: string };
 type LoadedVersion = { id: string; document: Document; reports: HistoricReport[] };
@@ -37,7 +38,7 @@ function collisionLabel(frame: Frame | undefined) {
   return frame?.collisionRects.map(rect => `(${rect.x}, ${rect.y}) ${rect.width} × ${rect.height}`).join('；') || '无';
 }
 
-export function VersionHistory({ asset, draft, selectedLayer, frameIndex, zoom, colorRef, busy = false, locked = false, onRestore, beforeRestore }: Props) {
+export function VersionHistory({ asset, draft, selectedLayer, frameIndex, zoom, colorRef, busy = false, locked = false, onRestore, beforeRestore, onBusyChange }: Props) {
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<LoadedVersion | null>(null);
   const [loading, setLoading] = useState(false);
@@ -134,6 +135,7 @@ export function VersionHistory({ asset, draft, selectedLayer, frameIndex, zoom, 
     if (!asset || busy || locked || working || versionId === asset.currentVersionId) return;
     const requestedAssetId = asset.id;
     setOperation('restore-check');
+    onBusyChange?.(true);
     setError('');
     setPlaying(false);
     try {
@@ -151,6 +153,7 @@ export function VersionHistory({ asset, draft, selectedLayer, frameIndex, zoom, 
       setError(failure instanceof Error ? failure.message : '无法恢复历史版本');
     } finally {
       setOperation(null);
+      onBusyChange?.(false);
     }
   }
 

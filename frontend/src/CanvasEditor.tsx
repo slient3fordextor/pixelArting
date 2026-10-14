@@ -39,6 +39,7 @@ type Props = {
   readonly?: boolean;
   label?: string;
   finding?: Finding | null;
+  difference?: Rect | null;
   onChange?: (image: string) => void;
   onPickColor?: (color: string) => void;
   onSelectionChange?: (selection: Rect | null) => void;
@@ -112,6 +113,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     onionFrames,
     readonly,
     finding,
+    difference,
     onChange,
     onPickColor,
     onSelectionChange,
@@ -701,6 +703,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
             }}
           />
         ) : null}
+        {difference && difference.width > 0 && difference.height > 0 && difference.x < frame.width && difference.y < frame.height ? <div className="difference-region" aria-label="修复像素变化范围" style={{ left: difference.x * zoom, top: difference.y * zoom, width: Math.min(difference.width, frame.width - difference.x) * zoom, height: Math.min(difference.height, frame.height - difference.y) * zoom }} /> : null}
       </div>
       <span className="coordinates">
         {cursor ? `${cursor[0]}, ${cursor[1]}` : `${frame.width} × ${frame.height}`}

@@ -4,7 +4,7 @@ import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronRight, ClipboardPaste, Copy, CopyPlus, Download, Eraser, Eye, EyeOff,
   FilePlus2, Folder, Grid2X2, Hand, History, ImagePlus, Layers, Lock, Minus, Move, PaintBucket, Pause, Pencil, Pipette, Play, Plus, Redo2,
   Circle, Crosshair, Scissors, Square, SquareDashedMousePointer,
-  RefreshCw, Save, ScanLine, Settings2, Sparkles, Trash2, Undo2, Unlock, Upload, X, ZoomIn, ZoomOut,
+  RefreshCw, Save, ScanLine, Settings2, Trash2, Undo2, Unlock, Upload, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { MouseEvent } from 'react';
@@ -14,9 +14,12 @@ import type { CanvasEditorHandle, DrawingTool, Rect } from './CanvasEditor';
 import { DrawingPalette } from './DrawingPalette';
 import { FrameMetadataEditor } from './FrameMetadataEditor';
 import { SpriteSheetImport } from './SpriteSheetImport';
+import { RepairControls } from './RepairControls';
+import { RepairSummary } from './RepairSummary';
+import { VersionHistory } from './VersionHistory';
 import { ContextMenu } from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
-import { defaultConfig, FIX_NAMES, RULE_NAMES } from './types';
+import { defaultConfig, RULE_NAMES } from './types';
 import type { Asset, AssetItem, CheckConfig, Direction, Document, Finding, Frame, Layer, Preview, Project, Report } from './types';
 
 function IconButton({ icon: Icon, label, onClick, disabled = false, active = false }: { icon: LucideIcon; label: string; onClick: () => void; disabled?: boolean; active?: boolean }) {
@@ -86,7 +89,6 @@ export default function App() {
   const [direction, setDirection] = useState<Direction>('down');
   const [animationFrameIndex, setAnimationFrameIndex] = useState<number | null>(null);
   const [duration, setDuration] = useState(200);
-  const [fix, setFix] = useState('remove-halo-v1');
   const layerInput = useRef<HTMLInputElement>(null);
   const layerNameInput = useRef<HTMLInputElement>(null);
   const canvasEditorRef = useRef<CanvasEditorHandle>(null);
@@ -628,6 +630,7 @@ export default function App() {
   }
 
   const frame = draft?.frames[frameIndex];
+  const previewChange = preview?.changes.find(change => change.frameId === frame?.id);
   const activeLayer = draft?.layers.find(layer => layer.id === selectedLayer);
   const currentAnimation = draft?.animations.find(a => a.action === action && a.direction === direction);
   const currentRefIndex = animationFrameIndex !== null && currentAnimation?.frames[animationFrameIndex]?.frameId === frame?.id
@@ -943,10 +946,10 @@ export default function App() {
           <div className="tool-group"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= 1} onClick={() => setZoom(v => v - 1)} /><span className="zoom-label">{zoom * 100}%</span><IconButton icon={ZoomIn} label="放大" disabled={zoom >= 12} onClick={() => setZoom(v => v + 1)} /></div>
         </div>
         <div className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
-          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={color => { colorRef.current = color; setPickedColor(color); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
-          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} readonly label="修复结果画布" /></div> : null}
+          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={color => { colorRef.current = color; setPickedColor(color); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
+          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
         </div>
-        {preview ? <div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div> : null}
+        {preview ? <><div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><label>帧<select aria-label="修复预览帧" value={frameIndex} disabled={busy} onChange={event => setFrameIndex(Number(event.target.value))}>{draft.frames.map((item, index) => <option key={item.id} value={index}>{index + 1}</option>)}</select></label><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div>{previewChange ? <RepairSummary change={previewChange} /> : null}</> : null}
         <DrawingPalette colorRef={colorRef} palette={config.palette} pickedColor={pickedColor} />
         <section className="timeline">
           <div className="timeline-heading"><div><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><span>帧时间轴</span><small>{draft.frames.length} 帧</small></div><div><IconButton icon={FilePlus2} label="新建空白帧" disabled={locked || draft.frames.length >= 64} onClick={() => createBlankFrame(frameIndex)} /><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></div></div>
@@ -994,9 +997,9 @@ export default function App() {
         </fieldset><button className="button primary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Report>(`/assets/${asset!.id}/check`, { versionId: asset!.currentVersionId, config }); setReport(result); setReports(history => [result, ...history]); setFinding(null); })}><ScanLine size={16} />运行质检</button>
         {reports.length ? <label className="field-label">检查历史<select aria-label="检查历史" value={report?.id ?? ''} onChange={event => { setReport(reports.find(item => item.id === event.target.value) ?? null); setFinding(null); }}><option value="">选择报告</option>{reports.map(item => <option key={item.id} value={item.id}>{item.created ? new Date(item.created).toLocaleString('zh-CN') : item.id?.slice(0, 8)} · {item.findings.length} 个问题</option>)}</select></label> : null}
         {report ? <><div className="report-summary"><CheckCheck size={17} /><span>{report.colorCount} 色 · {report.findings.length} 个问题</span></div><div className="findings">{report.findings.map(item => <button key={item.id} className={`finding-item ${finding?.id === item.id ? 'selected' : ''}`} onClick={() => { setFinding(item); const index = draft?.frames.findIndex(f => f.id === item.frameId) ?? -1; if (index >= 0) setFrameIndex(index); }}><span className={`severity ${item.severity}`}>{item.severity === 'warning' ? '警告' : item.severity === 'blocking' ? '阻断' : '错误'}</span><strong>{RULE_NAMES[item.ruleId]}</strong><p>{item.message}</p></button>)}</div>{report.rules.filter(r => r.status === 'skipped').map(r => <p key={r.ruleId} className="skip-reason">{RULE_NAMES[r.ruleId]}：{r.reason}</p>)}</> : null}
-        <div className="panel-divider" /><div className="section-label"><span>修复动作</span><Sparkles size={15} /></div><select className="full" aria-label="修复动作" value={fix} onChange={e => setFix(e.target.value)}>{Object.entries(FIX_NAMES).map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select><button className="button secondary full" disabled={!asset || dirty || locked} onClick={() => run(async () => { const result = await api<Preview>(`/assets/${asset!.id}/preview`, { versionId: asset!.currentVersionId, config, actions: [{ id: fix }] }); setPreview(result); setPlaying(false); }, '预览已生成')}><RefreshCw size={16} />预览修复</button>
+        <RepairControls asset={asset} config={config} dirty={dirty} busy={busy} locked={locked} onBusyChange={setBusy} onPreview={result => { setPreview(result); setFinding(null); setPlaying(false); }} />
       </div> : null}
-      {tab === 'versions' ? <div className="panel-content"><div className="section-label"><span>保存历史</span><small>{asset?.versions.length || 0} 个版本</small></div>{asset?.versions.map((version, index) => <div className="version-row" key={version.id}><div className="version-line"><History size={15} /><strong>{version.operation === 'upload' ? '原始版本' : version.operation === 'repair' ? '自动修复' : version.operation === 'rename' ? '重命名' : version.operation === 'copy' ? '复制' : '编辑保存'}</strong>{version.id === asset.currentVersionId ? <span className="current-badge">当前</span> : null}</div><span>{new Date(version.created).toLocaleString('zh-CN')} · {version.id.slice(0, 7)}</span><button className="button secondary" disabled={dirty || locked || version.id === asset.currentVersionId} onClick={() => run(async () => install(await api<Asset>(`/assets/${asset.id}/restore`, { expectedCurrentVersionId: asset.currentVersionId, versionId: version.id })), `已恢复版本 ${asset.versions.length - index}`)}>恢复版本</button></div>)}</div> : null}
+      {tab === 'versions' ? <div className="panel-content"><VersionHistory asset={asset} draft={draft} selectedLayer={selectedLayer} frameIndex={frameIndex} zoom={zoom} colorRef={colorRef} busy={busy} locked={locked} onBusyChange={setBusy} onRestore={install} beforeRestore={confirmDiscardCurrentDraft} /></div> : null}
     </aside>
 
     <input ref={layerInput} type="file" accept="image/png" hidden onChange={e => { const file = e.target.files?.[0]; if (file && !locked) { if (file.size > 8 * 1024 * 1024 || file.type !== 'image/png') setNotice({ message: '请选择 8 MB 以内的 PNG', error: true }); else run(() => addLayerFile(file)); } e.target.value = ''; }} />

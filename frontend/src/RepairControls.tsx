@@ -11,9 +11,10 @@ type Props = {
   busy?: boolean;
   locked?: boolean;
   onPreview: (preview: Preview) => void;
+  onBusyChange?: (busy: boolean) => void;
 };
 
-export function RepairControls({ asset, config, dirty = false, busy = false, locked = false, onPreview }: Props) {
+export function RepairControls({ asset, config, dirty = false, busy = false, locked = false, onPreview, onBusyChange }: Props) {
   const [action, setAction] = useState('remove-halo-v1');
   const [alphaThreshold, setAlphaThreshold] = useState(128);
   const [offsetX, setOffsetX] = useState(0);
@@ -32,6 +33,7 @@ export function RepairControls({ asset, config, dirty = false, busy = false, loc
   async function previewRepair() {
     if (!asset || dirty || disabled || !validParameters) return;
     setLoading(true);
+    onBusyChange?.(true);
     setError('');
     const parameters: RepairAction = { id: action, alphaThreshold: action === 'remove-halo-v1' ? alphaThreshold : 128, offsetX: action === 'pad-canvas-v1' ? offsetX : 0, offsetY: action === 'pad-canvas-v1' ? offsetY : 0 };
     try {
@@ -44,6 +46,7 @@ export function RepairControls({ asset, config, dirty = false, busy = false, loc
       setError(failure instanceof Error ? failure.message : '无法生成修复预览');
     } finally {
       setLoading(false);
+      onBusyChange?.(false);
     }
   }
 

@@ -82,6 +82,8 @@ small { font-size: 11px; color: #8a909a; font-weight: 400; }
 .leave-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
 .config-fields { padding: 0; margin: 0; border: 0; min-width: 0; }
 .draft-conflict { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 20px; border-bottom: 1px solid #e3e7eb; color: #9e5149; font-size: 12px; background: #fff4f2; }
+.difference-region { position: absolute; border: 1px solid #c19022; background: #efc34714; pointer-events: none; }
+.repair-summary { padding: 10px 20px; font-size: 11px; background: #f7faf8; border-bottom: 1px solid #e3e7eb; }
 .pixel-board canvas.pan-cursor { cursor: grab; }
 .pixel-board canvas.pan-cursor:active { cursor: grabbing; }
 .pixel-board canvas.select-cursor { cursor: crosshair; }
