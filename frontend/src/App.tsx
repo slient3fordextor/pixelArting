@@ -14,7 +14,7 @@ import { DrawingPalette } from './DrawingPalette';
 import { ContextMenu } from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { defaultConfig, FIX_NAMES, RULE_NAMES } from './types';
-import type { Asset, AssetItem, CheckConfig, Direction, Document, Finding, Layer, Preview, Project, Report } from './types';
+import type { Asset, AssetItem, CheckConfig, Direction, Document, Finding, Frame, Layer, Preview, Project, Report } from './types';
 
 function IconButton({ icon: Icon, label, onClick, disabled = false, active = false }: { icon: LucideIcon; label: string; onClick: () => void; disabled?: boolean; active?: boolean }) {
   return <button className={`icon-button ${active ? 'active' : ''}`} type="button" title={label} aria-label={label} onClick={onClick} disabled={disabled}><Icon size={17} /></button>;
@@ -80,6 +80,7 @@ export default function App() {
   const [renameValue, setRenameValue] = useState('');
   const [action, setAction] = useState<'idle' | 'walk'>('idle');
   const [direction, setDirection] = useState<Direction>('down');
+  const [animationFrameIndex, setAnimationFrameIndex] = useState<number | null>(null);
   const [duration, setDuration] = useState(200);
   const [fix, setFix] = useState('remove-halo-v1');
   const layerInput = useRef<HTMLInputElement>(null);
@@ -203,7 +204,7 @@ export default function App() {
     const animation = draft.animations.find(a => a.action === action && a.direction === direction);
     const sequence = animation?.frames ?? draft.frames.map(frame => ({ frameId: frame.id, durationMs: duration }));
     if (!sequence.length) { setPlaying(false); return; }
-    let index = Math.max(0, sequence.findIndex(ref => ref.frameId === draft.frames[latestFrameIndex.current]?.id));
+    let index = 0;
     let timer: ReturnType<typeof setTimeout>;
     // Keep a sequence cursor: animations may reference the same frame more than once.
     const advance = () => {
@@ -211,6 +212,7 @@ export default function App() {
         if (animation && !animation.loop && index === sequence.length - 1) { setPlaying(false); return; }
         index = (index + 1) % sequence.length;
         setFrameIndex(draft.frames.findIndex(frame => frame.id === sequence[index].frameId));
+        setAnimationFrameIndex(animation ? index : null);
         advance();
       }, sequence[index].durationMs);
     };
@@ -240,6 +242,7 @@ export default function App() {
     setFrameIndex(recoveredFrame); setDirty(Boolean(recovered)); setDraftStatus(recovered ? 'saved' : 'none'); setUndo([]); setRedo([]); setReport(null); setFinding(null); setPreview(null); setPlaying(false); setMenu(null);
     setAction(recoveredDocument.animations[0]?.action ?? 'idle');
     setDirection(recoveredDocument.animations[0]?.direction ?? 'down');
+    setAnimationFrameIndex(null);
     if (recovered) setNotice({ message: '已恢复未保存草稿；点击“保存”后才会写入正式版本', error: false });
   }
 
@@ -446,6 +449,26 @@ export default function App() {
       }
     });
     setFrameIndex(index + 1);
+    setAnimationFrameIndex(null);
+  }
+
+  function createBlankFrame(index: number) {
+    if (!draft || locked || draft.frames.length >= 64) return;
+    edit(document => {
+      const source = document.frames[index] || document.frames.at(-1)!;
+      const blank: Frame = {
+        id: `frame_${crypto.randomUUID().replaceAll('-', '')}`,
+        width: source.width,
+        height: source.height,
+        pixels: Object.fromEntries(document.layers.map(layer => [layer.id, blankImage(source.width, source.height)])),
+        origin: null,
+        baselineY: null,
+        collisionRects: [],
+      };
+      document.frames.splice(index + 1, 0, blank);
+    });
+    setFrameIndex(index + 1);
+    setAnimationFrameIndex(null);
   }
 
   function deleteFrame(index: number) {
@@ -456,6 +479,7 @@ export default function App() {
       document.animations = document.animations.map(a => ({ ...a, frames: a.frames.filter(f => f.frameId !== id) })).filter(a => a.frames.length);
     });
     setFrameIndex(Math.min(index, draft.frames.length - 2));
+    setAnimationFrameIndex(null);
   }
 
   function moveFrame(index: number, offset: number) {
@@ -465,10 +489,6 @@ export default function App() {
     const selectedId = draft.frames[frameIndex]?.id;
     edit(document => {
       [document.frames[index], document.frames[nextIndex]] = [document.frames[nextIndex], document.frames[index]];
-      const order = new Map(document.frames.map((frame, position) => [frame.id, position]));
-      for (const animation of document.animations) {
-        animation.frames.sort((a, b) => order.get(a.frameId)! - order.get(b.frameId)!);
-      }
     });
     if (selectedId === draft.frames[index].id) setFrameIndex(nextIndex);
     else if (selectedId === draft.frames[nextIndex].id) setFrameIndex(index);
@@ -503,7 +523,7 @@ export default function App() {
     if ((event.target as HTMLElement).closest('input, textarea, select')) return;
     event.preventDefault();
     if (target.layerId) setSelectedLayer(target.layerId);
-    if (target.frameIndex !== undefined && !locked) { setFrameIndex(target.frameIndex); setPlaying(false); }
+    if (target.frameIndex !== undefined && !locked) { setFrameIndex(target.frameIndex); setAnimationFrameIndex(null); setPlaying(false); }
     setMenu({ ...target, x: event.clientX, y: event.clientY });
   }
 
@@ -523,7 +543,10 @@ export default function App() {
   const frame = draft?.frames[frameIndex];
   const activeLayer = draft?.layers.find(layer => layer.id === selectedLayer);
   const currentAnimation = draft?.animations.find(a => a.action === action && a.direction === direction);
-  const currentRef = currentAnimation?.frames.find(ref => ref.frameId === frame?.id);
+  const currentRefIndex = animationFrameIndex !== null && currentAnimation?.frames[animationFrameIndex]?.frameId === frame?.id
+    ? animationFrameIndex
+    : currentAnimation?.frames.findIndex(ref => ref.frameId === frame?.id) ?? -1;
+  const currentRef = currentRefIndex >= 0 ? currentAnimation?.frames[currentRefIndex] : undefined;
   const locked = busy || !!preview || playing;
   const validDuration = Number.isInteger(duration) && duration >= 1 && duration <= 60000;
   useEffect(() => {
@@ -533,6 +556,7 @@ export default function App() {
   function selectAnimation(nextAction: typeof action, nextDirection: Direction) {
     setPlaying(false); setAction(nextAction); setDirection(nextDirection);
     const animation = draft?.animations.find(a => a.action === nextAction && a.direction === nextDirection);
+    setAnimationFrameIndex(animation ? 0 : null);
     if (animation && draft) setFrameIndex(draft.frames.findIndex(frame => frame.id === animation.frames[0].frameId));
   }
 
@@ -541,6 +565,7 @@ export default function App() {
     if (!draft || busy || preview || (!currentAnimation && !validDuration)) return;
     const firstId = currentAnimation?.frames[0].frameId ?? draft.frames[0].id;
     setFrameIndex(draft.frames.findIndex(frame => frame.id === firstId));
+    setAnimationFrameIndex(currentAnimation ? 0 : null);
     setPlaying(true);
   }
 
@@ -553,12 +578,69 @@ export default function App() {
         animation = { action, direction, loop: true, frames: [] };
         document.animations.push(animation);
       }
-      const ref = animation.frames.find(ref => ref.frameId === frame.id);
+      const ref = currentRefIndex >= 0 ? animation.frames[currentRefIndex] : undefined;
       if (ref) ref.durationMs = duration;
       else {
         animation.frames.push({ frameId: frame.id, durationMs: duration });
-        const order = new Map(document.frames.map((frame, index) => [frame.id, index]));
-        animation.frames.sort((a, b) => order.get(a.frameId)! - order.get(b.frameId)!);
+      }
+    });
+  }
+
+  function removeCurrentAnimationFrame() {
+    if (!draft || !frame || !currentAnimation || !currentRef) return;
+    edit(document => {
+      document.animations = document.animations
+        .map(animation => animation.action === action && animation.direction === direction
+          ? { ...animation, frames: animation.frames.filter((_, index) => index !== currentRefIndex) }
+          : animation)
+        .filter(animation => animation.frames.length > 0);
+    });
+    setAnimationFrameIndex(null);
+  }
+
+  function deleteCurrentAnimation() {
+    if (!draft || !currentAnimation) return;
+    edit(document => {
+      document.animations = document.animations.filter(animation => !(animation.action === action && animation.direction === direction));
+    });
+    setAnimationFrameIndex(null);
+  }
+
+  function toggleCurrentAnimationLoop() {
+    if (!currentAnimation) return;
+    edit(document => {
+      const animation = document.animations.find(item => item.action === action && item.direction === direction);
+      if (animation) animation.loop = !animation.loop;
+    });
+  }
+
+  function moveAnimationFrame(offset: number) {
+    if (!draft || !currentAnimation || !currentRef) return;
+    const refIndex = currentRefIndex;
+    const nextIndex = refIndex + offset;
+    if (refIndex < 0 || nextIndex < 0 || nextIndex >= currentAnimation.frames.length) return;
+    edit(document => {
+      const animation = document.animations.find(item => item.action === action && item.direction === direction);
+      if (!animation) return;
+      [animation.frames[refIndex], animation.frames[nextIndex]] = [animation.frames[nextIndex], animation.frames[refIndex]];
+    });
+    setAnimationFrameIndex(nextIndex);
+  }
+
+  function addAllAnimationFrames() {
+    if (!draft || !validDuration) return;
+    edit(document => {
+      document.type = 'character';
+      let animation = document.animations.find(item => item.action === action && item.direction === direction);
+      if (!animation) {
+        animation = { action, direction, loop: true, frames: [] };
+        document.animations.push(animation);
+      }
+      const included = new Set(animation.frames.map(ref => ref.frameId));
+      for (const item of document.frames) {
+        if (!included.has(item.id) && animation.frames.length < 128) {
+          animation.frames.push({ frameId: item.id, durationMs: duration });
+        }
       }
     });
   }
@@ -710,6 +792,7 @@ export default function App() {
     { label: '帧前移', icon: ArrowLeft, disabled: locked || menu.frameIndex === 0, action: () => moveFrame(menu.frameIndex!, -1) },
     { label: '帧后移', icon: ArrowRight, disabled: locked || menu.frameIndex === draft.frames.length - 1, action: () => moveFrame(menu.frameIndex!, 1) },
     null,
+    { label: '新建空白帧', icon: FilePlus2, disabled: locked || draft.frames.length >= 64, action: () => createBlankFrame(menu.frameIndex!) },
     { label: '复制帧', icon: Copy, disabled: locked || draft.frames.length >= 64, action: () => duplicateFrame(menu.frameIndex!) },
     { label: '删除帧', icon: Trash2, danger: true, disabled: locked || draft.frames.length <= 1, action: () => deleteFrame(menu.frameIndex!) },
   ];
@@ -766,9 +849,26 @@ export default function App() {
         {preview ? <div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div> : null}
         <DrawingPalette colorRef={colorRef} palette={config.palette} pickedColor={pickedColor} />
         <section className="timeline">
-          <div className="timeline-heading"><div><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><span>帧时间轴</span><small>{draft.frames.length} 帧</small></div><div><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></div></div>
-          <div className="frame-list">{draft.frames.map((f, i) => { const mapped = currentAnimation?.frames.find(ref => ref.frameId === f.id); return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">{mapped.durationMs} ms</small> : null}</button>; })}</div>
-          <div className="animation-controls"><select aria-label="动作" value={action} disabled={busy || !!preview} onChange={e => selectAnimation(e.target.value as typeof action, direction)}><option value="idle">idle</option><option value="walk">walk</option></select><select aria-label="方向" value={direction} disabled={busy || !!preview} onChange={e => selectAnimation(action, e.target.value as Direction)}>{Object.entries(directionNames).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select><label><input aria-label="帧时长" type="number" min={1} max={60000} step={1} value={duration} disabled={locked} onChange={e => setDuration(Number(e.target.value))} /> ms</label><button className="button secondary" disabled={locked || !validDuration || (!currentRef && (currentAnimation?.frames.length ?? 0) >= 128)} onClick={updateAnimationFrame}>{currentRef ? '更新时长' : '加入动画'}</button><span className="mapping-count">{currentAnimation?.frames.length || 0} 帧</span></div>
+          <div className="timeline-heading"><div><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><span>帧时间轴</span><small>{draft.frames.length} 帧</small></div><div><IconButton icon={FilePlus2} label="新建空白帧" disabled={locked || draft.frames.length >= 64} onClick={() => createBlankFrame(frameIndex)} /><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></div></div>
+          <div className="frame-list">{draft.frames.map((f, i) => { const mappingIndex = currentAnimation?.frames.findIndex(ref => ref.frameId === f.id) ?? -1; const mapped = mappingIndex >= 0 ? currentAnimation?.frames[mappingIndex] : undefined; return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setAnimationFrameIndex(null); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">#{mappingIndex + 1} · {mapped.durationMs} ms</small> : null}</button>; })}</div>
+          <div className="animation-controls">
+            <select aria-label="动作" value={action} disabled={busy || !!preview} onChange={e => selectAnimation(e.target.value as typeof action, direction)}><option value="idle">idle</option><option value="walk">walk</option></select>
+            <select aria-label="方向" value={direction} disabled={busy || !!preview} onChange={e => selectAnimation(action, e.target.value as Direction)}>{Object.entries(directionNames).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select>
+            <label><input aria-label="帧时长" type="number" min={1} max={60000} step={1} value={duration} disabled={locked} onChange={e => setDuration(Number(e.target.value))} /> ms</label>
+            <button className="button secondary" disabled={locked || !validDuration || (!currentRef && (currentAnimation?.frames.length ?? 0) >= 128)} onClick={updateAnimationFrame}>{currentRef ? '更新时长' : '加入动画'}</button>
+            <IconButton icon={CheckCheck} label="加入全部帧" disabled={locked || !validDuration || (currentAnimation?.frames.length ?? 0) >= 128 || draft.frames.every(item => currentAnimation?.frames.some(ref => ref.frameId === item.id))} onClick={addAllAnimationFrames} />
+            <IconButton icon={X} label="移除当前帧" disabled={locked || !currentRef} onClick={removeCurrentAnimationFrame} />
+            <IconButton icon={ArrowLeft} label="动作帧前移" disabled={locked || currentRefIndex <= 0} onClick={() => moveAnimationFrame(-1)} />
+            <IconButton icon={ArrowRight} label="动作帧后移" disabled={locked || currentRefIndex < 0 || currentRefIndex === (currentAnimation?.frames.length ?? 0) - 1} onClick={() => moveAnimationFrame(1)} />
+            <label className="loop-toggle"><input aria-label="循环播放" type="checkbox" checked={currentAnimation?.loop ?? true} disabled={locked || !currentAnimation} onChange={toggleCurrentAnimationLoop} />循环</label>
+            <IconButton icon={Trash2} label="删除当前动画" disabled={locked || !currentAnimation} onClick={deleteCurrentAnimation} />
+            <span className="mapping-count">{currentAnimation?.frames.length || 0} 帧</span>
+          </div>
+          {currentAnimation ? <div className="animation-sequence" aria-label="当前动画序列">{currentAnimation.frames.map((ref, index) => {
+            const sourceIndex = draft.frames.findIndex(item => item.id === ref.frameId);
+            const source = draft.frames[sourceIndex];
+            return source ? <button key={`${ref.frameId}-${index}`} className={`animation-step ${index === currentRefIndex ? 'selected' : ''}`} aria-label={`动作第 ${index + 1} 帧（素材帧 ${sourceIndex + 1}）`} aria-pressed={index === currentRefIndex} disabled={busy || !!preview} onClick={() => { setFrameIndex(sourceIndex); setAnimationFrameIndex(index); setPlaying(false); }}><Miniature frame={source} layers={draft.layers} /><span>{index + 1} · {ref.durationMs} ms</span></button> : null;
+          })}</div> : null}
         </section>
       </> : <div className="empty-workbench"><ImagePlus size={42} /><h1>素材工作台</h1><div className="inline-tools"><button className="button primary" disabled={!projectId || busy} onClick={() => setDialog('asset')}><FilePlus2 size={16} />新建素材</button><button className="button secondary" disabled={!projectId || busy} onClick={openUpload}><Upload size={16} />上传 PNG</button></div></div>}
     </main>
