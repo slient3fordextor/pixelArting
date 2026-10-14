@@ -32,6 +32,7 @@ function IconButton({ icon: Icon, label, onClick, disabled = false, active = fal
 const directionNames: Record<Direction, string> = { down: '下', left: '左', right: '右', up: '上' };
 const statusNames: Record<string, string> = { passed: '通过', findings: '问题', skipped: '跳过', disabled: '关闭', failed: '失败' };
 const DRAFT_STORAGE_PREFIX = 'pixelart-draft-v1:';
+const CONFIG_DRAFT_STORAGE_PREFIX = 'pixelart-config-draft-v1:';
 
 type StoredDraft = {
   assetId: string;
@@ -39,6 +40,13 @@ type StoredDraft = {
   document: Document;
   frameIndex: number;
   selectedLayer: string;
+  updatedAt: string;
+};
+type StoredConfigDraft = {
+  projectId: string;
+  baseConfig: CheckConfig;
+  config: CheckConfig;
+  paletteText: string;
   updatedAt: string;
 };
 
@@ -104,6 +112,7 @@ export default function App() {
   const latestFrameIndex = useRef(0);
   const latestSelectedLayer = useRef('');
   const [draftStatus, setDraftStatus] = useState<'none' | 'saving' | 'saved' | 'error'>('none');
+  const [configDraftStatus, setConfigDraftStatus] = useState<'none' | 'saving' | 'saved' | 'error'>('none');
   const [leaveRequest, setLeaveRequest] = useState<{ resolve: (answer: boolean) => void } | null>(null);
   const [savingBeforeLeave, setSavingBeforeLeave] = useState(false);
   const configDirty = JSON.stringify(config) !== JSON.stringify(savedConfig)
@@ -162,6 +171,33 @@ export default function App() {
     try { localStorage.removeItem(draftStorageKey(assetId)); } catch { /* Storage may be unavailable. */ }
   }
 
+  function configDraftStorageKey(id: string) {
+    return `${CONFIG_DRAFT_STORAGE_PREFIX}${id}`;
+  }
+
+  function persistConfigDraft(id: string, currentConfig: CheckConfig, currentPaletteText: string, baseConfig: CheckConfig) {
+    if (!id) return false;
+    try {
+      const payload: StoredConfigDraft = { projectId: id, baseConfig: structuredClone(baseConfig), config: structuredClone(currentConfig), paletteText: currentPaletteText, updatedAt: new Date().toISOString() };
+      localStorage.setItem(configDraftStorageKey(id), JSON.stringify(payload));
+      return true;
+    } catch { return false; }
+  }
+
+  function discardConfigDraft(id: string) {
+    try { localStorage.removeItem(configDraftStorageKey(id)); } catch { /* Storage may be unavailable. */ }
+  }
+
+  function recoverConfigDraft(id: string, serverConfig: CheckConfig): StoredConfigDraft | null {
+    try {
+      const raw = localStorage.getItem(configDraftStorageKey(id));
+      if (!raw) return null;
+      const stored = JSON.parse(raw) as StoredConfigDraft;
+      if (stored.projectId !== id || !stored.config || JSON.stringify(stored.baseConfig) !== JSON.stringify(serverConfig)) return null;
+      return { ...stored, config: structuredClone(stored.config), baseConfig: structuredClone(stored.baseConfig) };
+    } catch { return null; }
+  }
+
   async function confirmDiscardCurrentDraft(_message?: string) {
     completeStroke();
     if (!latestDirty.current && !configDirty) return true;
@@ -191,6 +227,7 @@ export default function App() {
       }
       setConfig(structuredClone(savedConfig));
       setPaletteText(savedConfig.palette.join(', '));
+      if (projectId) discardConfigDraft(projectId);
     }
     leaveRequest.resolve(choice !== 'cancel');
     setLeaveRequest(null);
@@ -234,9 +271,20 @@ export default function App() {
   }, [asset, draft, dirty, frameIndex, selectedLayer]);
 
   useEffect(() => {
+    if (!projectId || !configDirty) {
+      setConfigDraftStatus('none');
+      return;
+    }
+    setConfigDraftStatus('saving');
+    const timer = window.setTimeout(() => setConfigDraftStatus(persistConfigDraft(projectId, config, paletteText, savedConfig) ? 'saved' : 'error'), 600);
+    return () => window.clearTimeout(timer);
+  }, [projectId, config, paletteText, savedConfig, configDirty]);
+
+  useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
       if (!dirty && !configDirty && !drawingStroke) return;
       if (dirty) persistDraftSnapshot(latestAsset.current, latestDraft.current);
+      if (configDirty && projectId) persistConfigDraft(projectId, config, paletteText, savedConfig);
       event.preventDefault();
       event.returnValue = '';
     };
@@ -249,6 +297,7 @@ export default function App() {
       const { action, resolve } = (event as CustomEvent<{ action: 'save' | 'discard'; resolve: (allowed: boolean) => void }>).detail;
       if (action === 'discard') {
         if (asset) discardStoredDraft(asset.id);
+        if (projectId) discardConfigDraft(projectId);
         resolve(true);
         return;
       }
@@ -331,9 +380,11 @@ export default function App() {
     ]);
     const next = list.length ? await api<Asset>(`/assets/${list[0].id}`) : null;
     if (sequence !== loadSequence.current) return;
+    const recoveredConfig = recoverConfigDraft(id, projectConfig);
     setProjectId(id); setAssets(list);
-    setConfig(projectConfig); setSavedConfig(structuredClone(projectConfig)); setPaletteText(projectConfig.palette.join(', '));
+    setConfig(recoveredConfig?.config || projectConfig); setSavedConfig(structuredClone(projectConfig)); setPaletteText(recoveredConfig?.paletteText ?? projectConfig.palette.join(', '));
     setAssetWidth(projectConfig.targetWidth); setAssetHeight(projectConfig.targetHeight);
+    if (recoveredConfig) setNotice({ message: '已恢复未保存项目配置；点击“保存项目配置”后才会写入正式配置', error: false });
     if (next) install(next);
     else { setAsset(null); setDraft(null); setDirty(false); setReport(null); setPreview(null); setConflictingDraft(null); }
   }
@@ -479,6 +530,7 @@ export default function App() {
     if (palette.some(color => !/^#[\da-f]{6}$/i.test(color))) throw new Error('调色板请使用 #RRGGBB，以逗号或空格分隔');
     const updated = await api<CheckConfig>(`/projects/${projectId}/check-config`, { ...config, palette }, 'PUT');
     setConfig(updated); setSavedConfig(structuredClone(updated)); setPaletteText(updated.palette.join(', '));
+    discardConfigDraft(projectId);
   }
 
   function patchLayer(id: string, change: Partial<Layer>) {
@@ -930,7 +982,7 @@ export default function App() {
         const list = await api<Project[]>('/projects'); setProjects(list);
         if (list.length) await switchProject(list[0].id); else { setProjectId(''); setAsset(null); setDraft(null); }
       }} /></div></div>
-      <label className="project-picker"><Folder size={16} /><select aria-label="项目" value={projectId} disabled={locked} onChange={event => run(() => switchProject(event.target.value))}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+      <label className="project-picker"><Folder size={16} /><select aria-label="项目" value={projectId} disabled={locked} onChange={event => { const nextProjectId = event.currentTarget.value; void run(() => switchProject(nextProjectId)); }}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
       <div className="section-label assets-label"><span>素材 <small>{assets.length}</small></span><div className="inline-tools"><IconButton icon={FilePlus2} label="新建素材" disabled={locked || !projectId} onClick={() => setDialog('asset')} /><IconButton icon={Upload} label="上传 PNG 或 Sprite Sheet" disabled={locked || !projectId} onClick={openUpload} /><ExchangeControls projectId={projectId} busy={busy} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} onProjectImported={async imported => { setProjects(list => [...list, imported]); await switchProject(imported.id); }} /></div></div>
       <div className="asset-list">{assets.map(item => <div key={item.id} className={`asset-row ${item.id === asset?.id ? 'selected' : ''} ${renamingAssetId === item.id ? 'renaming' : ''}`} onContextMenu={event => { event.stopPropagation(); context(event, { kind: 'asset', assetId: item.id }); }}>
         <div role="button" tabIndex={locked ? -1 : 0} aria-disabled={locked} aria-label={`${item.name}预览`} className="asset-item" onClick={() => { if (!locked) run(() => switchAsset(item.id)); }} onKeyDown={event => { if (!locked && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); run(() => switchAsset(item.id)); } }}>
@@ -1015,7 +1067,7 @@ export default function App() {
 
     <input ref={layerInput} type="file" accept="image/png" hidden onChange={e => { const file = e.target.files?.[0]; if (file && !locked) { if (file.size > 8 * 1024 * 1024 || file.type !== 'image/png') setNotice({ message: '请选择 8 MB 以内的 PNG', error: true }); else run(() => addLayerFile(file)); } e.target.value = ''; }} />
     {menu ? <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} /> : null}
-    <footer className="status-bar"><span>{busy ? '处理中…' : draftStatus === 'saving' ? '自动保存中…' : draftStatus === 'saved' ? '草稿已自动保存' : draftStatus === 'error' ? '自动保存失败' : dirty ? '未保存的编辑' : '就绪'}</span><span>{frame ? `${frame.width} × ${frame.height} · RGBA · ${draft?.layers.length} 图层` : 'PNG / Sprite Sheet'}</span><span>Python · FastAPI</span></footer>
+    <footer className="status-bar"><span>{busy ? '处理中…' : draftStatus === 'saving' || configDraftStatus === 'saving' ? '自动保存中…' : draftStatus === 'saved' || configDraftStatus === 'saved' ? '草稿已自动保存' : draftStatus === 'error' || configDraftStatus === 'error' ? '自动保存失败' : dirty || configDirty ? '未保存的编辑' : '就绪'}</span><span>{frame ? `${frame.width} × ${frame.height} · RGBA · ${draft?.layers.length} 图层` : 'PNG / Sprite Sheet'}</span><span>Python · FastAPI</span></footer>
     {notice ? <div role={notice.error ? 'alert' : 'status'} className={`toast ${notice.error ? 'error' : ''}`}><span>{notice.message}</span><IconButton icon={X} label="关闭提示" onClick={() => setNotice(null)} /></div> : null}
     {leaveRequest ? <div className="modal-backdrop">
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="leave-title" onKeyDown={event => {
