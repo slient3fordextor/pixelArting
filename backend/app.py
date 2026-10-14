@@ -201,14 +201,13 @@ def create_app(data_root: Path | None = None):
 
     @app.get("/api/assets/{asset_id}/export")
     def export(asset_id: str, versionId: str, target: str = "png", frameId: str | None = None):
-        if target not in ("png", "json", "godot"):
+        from .exports import export_png
+
+        if target not in ("png", "frames", "sheet", "json", "godot"):
             raise HTTPException(422, "不支持的导出目标")
         document = store.document(asset_id, versionId)
         if target == "png":
-            frame = next((frame for frame in document.frames if frame.id == frameId), None) if frameId else document.frames[0]
-            if not frame:
-                raise KeyError("帧不存在")
-            return Response(png_bytes(composite(document, frame)), media_type="image/png", headers={"Content-Disposition": 'attachment; filename="pixelart.png"'})
+            return Response(export_png(document, frameId), media_type="image/png", headers={"Content-Disposition": 'attachment; filename="pixelart.png"'})
         return Response(export_bundle(document, asset_id, versionId, target), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="pixelart-{target}.zip"'})
 
     dist = ROOT / "frontend" / "dist"
