@@ -5,7 +5,9 @@ import json
 import random
 import sqlite3
 import stat
+import struct
 import zipfile
+import zlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -59,6 +61,23 @@ def repack(files, rehash=False):
         for name, content in files.items():
             archive.writestr(name, content)
     return output.getvalue()
+
+
+def forge_entry(data, name, *, size=None, crc=None, compressed_size=None):
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        entry = archive.getinfo(name)
+        central = archive.start_dir
+        for item in archive.infolist():
+            if item.filename == name:
+                break
+            name_size, extra_size, comment_size = struct.unpack_from("<3H", data, central + 28)
+            central += 46 + name_size + extra_size + comment_size
+    forged = bytearray(data)
+    for value, local_offset, central_offset in [(crc, 14, 16), (compressed_size, 18, 20), (size, 22, 24)]:
+        if value is not None:
+            struct.pack_into("<I", forged, entry.header_offset + local_offset, value)
+            struct.pack_into("<I", forged, central + central_offset, value)
+    return bytes(forged)
 
 
 def import_asset(client, project, data):
@@ -147,6 +166,125 @@ def test_file_count_member_size_and_total_expansion_are_bounded(client, monkeypa
             scoped.setattr(exchange, setting, value)
             assert import_asset(client, project, data).status_code == 422
     assert len(client.get(f'/api/projects/{project["id"]}/assets').json()) == 1
+
+
+@pytest.mark.parametrize("name", ["padding.bin", "asset.json", "manifest.json"])
+def test_forged_lengths_and_crc_cannot_hide_unhashed_output_or_metadata_padding(client, name):
+    project, source = rich_asset(client)
+    files = members(bundle(client, source))
+    if name == "padding.bin":
+        files[name] = b"A"
+        files = members(repack(files, rehash=True))
+    original = files[name]
+    files[name] += b" " * (8 * 1024 * 1024)
+    forged = forge_entry(repack(files), name, size=len(original), crc=zlib.crc32(original))
+    # The standard reader hides the extra output, so every manifest hash still
+    # matches. Valid JSON plus whitespace also conceals oversized metadata.
+    with zipfile.ZipFile(io.BytesIO(forged)) as archive:
+        assert archive.read(name) == original
+    manifest = json.loads(files["manifest.json"] if name != "manifest.json" else original)
+    assert name == "manifest.json" or manifest["files"][name] == hashlib.sha256(original).hexdigest()
+    assert import_asset(client, project, forged).status_code == 422
+    assert len(client.get(f'/api/projects/{project["id"]}/assets').json()) == 1
+    with client.app.state.store.connection() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM versions").fetchone()[0] == 1
+
+
+def test_fake_tiny_size_is_rejected_before_large_output_is_allocated(monkeypatch):
+    original = repack({"padding.bin": b"A" * (8 * 1024 * 1024)})
+    forged = forge_entry(original, "padding.bin", size=1, crc=zlib.crc32(b"A"))
+    decoder_factory = zlib.decompressobj
+    output_sizes = []
+
+    class ObservedDecoder:
+        def __init__(self, *args):
+            self.decoder = decoder_factory(*args)
+
+        def decompress(self, data, max_length=0):
+            assert 0 < max_length <= 2
+            output = self.decoder.decompress(data, max_length)
+            output_sizes.append(len(output))
+            return output
+
+        def __getattr__(self, name):
+            return getattr(self.decoder, name)
+
+    monkeypatch.setattr(exchange.zlib, "decompressobj", ObservedDecoder)
+    monkeypatch.setattr(exchange, "MAX_EXPANDED_BYTES", 2)
+    with pytest.raises(ValueError, match="真实解压大小"):
+        exchange._read_archive(forged)
+    assert output_sizes == [2]
+
+
+@pytest.mark.parametrize("mutation", ["short", "long", "crc", "truncated", "trailing", "header-size", "header-crc"])
+def test_member_headers_actual_lengths_crc_and_deflate_end_are_verified(mutation):
+    content = b"valid content" * 100
+    data = repack({"test.bin": content})
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        entry = archive.getinfo("test.bin")
+    if mutation == "short":
+        data = forge_entry(data, "test.bin", size=len(content) - 1, crc=zlib.crc32(content[:-1]))
+    elif mutation == "long":
+        data = forge_entry(data, "test.bin", size=len(content) + 1)
+    elif mutation == "crc":
+        data = forge_entry(data, "test.bin", crc=0)
+    elif mutation == "truncated":
+        data = forge_entry(data, "test.bin", compressed_size=entry.compress_size - 1)
+    elif mutation == "trailing":
+        files = {"test.bin": content, "later.bin": b"later"}
+        data = repack(files)
+        data = forge_entry(data, "test.bin", compressed_size=entry.compress_size + 1)
+        # Make the extra compressed byte occupy harmless padding before the
+        # next local header, so overlap checks alone cannot reject it.
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            following = archive.getinfo("later.bin").header_offset
+            central = archive.start_dir
+        expanded = bytearray(data[:following] + b"\0" + data[following:])
+        central += 1
+        next_central = central + 46 + len("test.bin")
+        struct.pack_into("<I", expanded, next_central + 42, following + 1)
+        end_record = len(expanded) - 22
+        struct.pack_into("<I", expanded, end_record + 16, central)
+        data = bytes(expanded)
+    else:
+        changed = bytearray(data)
+        struct.pack_into("<I", changed, entry.header_offset + (22 if mutation == "header-size" else 14), 0)
+        data = bytes(changed)
+    with pytest.raises(ValueError):
+        exchange._read_archive(data)
+
+
+@pytest.mark.parametrize("compression", [zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_supported_zip_methods_and_streaming_descriptors_preserve_contents(compression, streaming):
+    class Unseekable(io.BytesIO):
+        def seek(self, *_):
+            raise io.UnsupportedOperation("seek")
+
+    output = Unseekable() if streaming else io.BytesIO()
+    files = {"test.bin": b"test" * 100_000, "empty.bin": b""}
+    with zipfile.ZipFile(output, "w", compression) as archive:
+        archive.writestr("empty/", b"")
+        for name, content in files.items():
+            archive.writestr(name, content)
+    assert exchange._read_archive(output.getvalue()) == files
+
+
+def test_stored_size_mismatch_hidden_directory_data_and_zip64_are_rejected():
+    stored = io.BytesIO()
+    with zipfile.ZipFile(stored, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("test.bin", b"long content")
+    with pytest.raises(ValueError):
+        exchange._read_archive(forge_entry(stored.getvalue(), "test.bin", size=1, crc=zlib.crc32(b"l")))
+    directory = repack({"hidden/": b"A" * 100_000})
+    with pytest.raises(ValueError, match="真实解压大小"):
+        exchange._read_archive(forge_entry(directory, "hidden/", size=0, crc=0))
+    zip64 = io.BytesIO()
+    with zipfile.ZipFile(zip64, "w", zipfile.ZIP_DEFLATED) as archive:
+        with archive.open("test.bin", "w", force_zip64=True) as member:
+            member.write(b"small content")
+    with pytest.raises(ValueError, match="ZIP64"):
+        exchange._read_archive(zip64.getvalue())
 
 
 def test_archive_limit_and_scoped_http_body_limit_are_enforced(client, monkeypatch):
