@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -8,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 from .exports import export_bundle
+from .exchange import MAX_ARCHIVE_BYTES, MAX_EXPANDED_BYTES, MAX_PROJECT_ASSETS, export_project, import_bundle, import_project
 from .images import MAX_UPLOAD_BYTES, composite, encode_image, png_bytes
 from .imports import SheetLayout, imported_document, preview_import, retain_png
 from .models import BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
@@ -35,6 +37,16 @@ def create_app(data_root: Path | None = None):
         if request.method not in ("GET", "HEAD", "OPTIONS") and origin and origin not in allowed:
             return JSONResponse({"detail": "本地单用户模式不接受外部站点写入"}, status_code=403)
         if request.method in ("POST", "PUT", "PATCH"):
+            exchange_upload = request.url.path == "/api/projects/import-backup" or bool(re.fullmatch(r"/api/projects/[^/]+/assets/import-bundle", request.url.path))
+            if exchange_upload:
+                chunks, size = [], 0
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_ARCHIVE_BYTES + 1024 * 1024:
+                        return JSONResponse({"detail": "导入请求不能超过 129 MB"}, status_code=413)
+                    chunks.append(chunk)
+                request._body = b"".join(chunks)
+                return await call_next(request)
             body = await request.body()
             if len(body) > 20 * 1024 * 1024:
                 return JSONResponse({"detail": "请求不能超过 20 MB"}, status_code=413)
@@ -63,6 +75,16 @@ def create_app(data_root: Path | None = None):
     @app.post("/api/projects", status_code=201)
     def project(body: ProjectCreate):
         return store.project(body.name)
+
+    @app.post("/api/projects/import-backup", status_code=201)
+    async def restore_project(file: UploadFile = File(...)):
+        name, config, documents = import_project(await file.read(MAX_ARCHIVE_BYTES + 1))
+        return store.restore_project(name, config, documents)
+
+    @app.get("/api/projects/{project_id}/backup")
+    def backup_project(project_id: str):
+        package = export_project(store.snapshot_project(project_id, MAX_PROJECT_ASSETS, MAX_EXPANDED_BYTES))
+        return Response(package, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="pixelart-project.zip"'})
 
     @app.put("/api/projects/{project_id}")
     def rename_project(project_id: str, body: RenameProjectRequest):
@@ -116,6 +138,10 @@ def create_app(data_root: Path | None = None):
             source_version = body.versionId or source_asset["currentVersionId"]
             source = store.document(body.sourceAssetId, source_version)
         return store.copy_asset(project_id, source, body.sourceAssetId, source_version)
+
+    @app.post("/api/projects/{project_id}/assets/import-bundle", status_code=201)
+    async def import_asset_bundle(project_id: str, file: UploadFile = File(...)):
+        return store.import_asset(project_id, import_bundle(await file.read(MAX_ARCHIVE_BYTES + 1)))
 
     async def read_import_source(project_id: str, file: UploadFile):
         with store.connection() as connection:

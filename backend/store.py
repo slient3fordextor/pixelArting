@@ -169,6 +169,61 @@ class Store:
             conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "upload", document.model_dump_json(), digest, now()))
         return self.asset(asset_id)
 
+    def import_asset(self, project_id: str, document: Document):
+        validate_images(document)
+        asset_id, version_id = uid(), uid()
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
+                raise KeyError("项目不存在")
+            imported = document.model_copy(deep=True)
+            imported.name = self._unique_name(conn, project_id, imported.name)
+            digest = checksum(imported)
+            created = now()
+            conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project_id, imported.name, version_id, created))
+            conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "import", imported.model_dump_json(), digest, created))
+        return self.asset(asset_id)
+
+    def snapshot_project(self, project_id: str, max_assets: int, max_document_bytes: int):
+        with self.connection() as conn:
+            conn.execute("BEGIN")
+            project = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
+            if not project:
+                raise KeyError("项目不存在")
+            row = conn.execute("SELECT config FROM project_configs WHERE project_id=?", (project_id,)).fetchone()
+            config = CheckConfig.model_validate_json(row["config"]) if row else CheckConfig()
+            size = conn.execute(
+                "SELECT COUNT(*) AS assets,SUM(LENGTH(CAST(v.document AS BLOB))) AS bytes FROM assets a LEFT JOIN versions v ON v.id=a.current_version AND v.asset_id=a.id WHERE a.project_id=?",
+                (project_id,),
+            ).fetchone()
+            if size["assets"] > max_assets or (size["bytes"] or 0) > max_document_bytes:
+                raise ValueError("项目备份超过素材数量或数据大小上限")
+            rows = conn.execute(
+                "SELECT a.id,a.current_version,v.document FROM assets a LEFT JOIN versions v ON v.id=a.current_version AND v.asset_id=a.id WHERE a.project_id=? ORDER BY a.created,a.id",
+                (project_id,),
+            )
+            assets = []
+            for asset in rows:
+                if asset["document"] is None:
+                    raise ValueError("项目包含缺少当前版本的素材，无法备份")
+                assets.append({"id": asset["id"], "currentVersionId": asset["current_version"], "document": Document.model_validate_json(asset["document"])})
+        return {"name": project["name"], "config": config, "assets": assets}
+
+    def restore_project(self, name: str, config: CheckConfig, documents: list[Document]):
+        prepared = []
+        for document in documents:
+            validate_images(document)
+            prepared.append((uid(), uid(), document, checksum(document)))
+        project = {"id": uid(), "name": name, "created": now()}
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO projects VALUES (:id,:name,:created)", project)
+            conn.execute("INSERT INTO project_configs(project_id, config, updated) VALUES (?,?,?)", (project["id"], config.model_dump_json(), project["created"]))
+            for asset_id, version_id, document, digest in prepared:
+                conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project["id"], document.name, version_id, project["created"]))
+                conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "import", document.model_dump_json(), digest, project["created"]))
+        return project
+
     def _unique_name(self, conn, project_id: str, requested: str) -> str:
         base = requested.strip()[:100] or "未命名素材"
         names = {row["name"] for row in conn.execute("SELECT name FROM assets WHERE project_id=?", (project_id,))}
