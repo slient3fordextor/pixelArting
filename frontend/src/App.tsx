@@ -12,6 +12,7 @@ import { CanvasEditor } from './CanvasEditor';
 import type { CanvasEditorHandle, DrawingTool, Rect } from './CanvasEditor';
 import { DrawingPalette } from './DrawingPalette';
 import { FrameMetadataEditor } from './FrameMetadataEditor';
+import { SpriteSheetImport } from './SpriteSheetImport';
 import { ContextMenu } from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { defaultConfig, FIX_NAMES, RULE_NAMES } from './types';
@@ -72,10 +73,6 @@ export default function App() {
   const [assetWidth, setAssetWidth] = useState(64);
   const [assetHeight, setAssetHeight] = useState(64);
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'canvas' | 'layer' | 'frame' | 'library' | 'asset'; layerId?: string; frameIndex?: number; assetId?: string } | null>(null);
-  const [sheet, setSheet] = useState(false);
-  const [cellWidth, setCellWidth] = useState(64);
-  const [cellHeight, setCellHeight] = useState(64);
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const assetClipboard = useRef<{ document: Document; sourceAssetId?: string; versionId?: string } | null>(null);
   const [playing, setPlaying] = useState(false);
   const [renamingAssetId, setRenamingAssetId] = useState<string | null>(null);
@@ -581,7 +578,7 @@ export default function App() {
     layerInput.current?.click();
   }
 
-  function openUpload() { setPendingFile(null); setDialog('upload'); }
+  function openUpload() { setDialog('upload'); }
 
   function context(event: MouseEvent, target: Omit<NonNullable<typeof menu>, 'x' | 'y'>) {
     if ((event.target as HTMLElement).closest('input, textarea, select')) return;
@@ -989,8 +986,8 @@ export default function App() {
         </div>
       </section>
     </div> : null}
-    {dialog && !leaveRequest ? <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !busy) setDialog(null); }}>
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    {dialog ? <div className="modal-backdrop" inert={!!leaveRequest} style={leaveRequest ? { visibility: 'hidden' } : undefined} onMouseDown={event => { if (event.target === event.currentTarget && !busy) setDialog(null); }}>
+      <section className={`modal ${dialog === 'upload' ? 'import-modal' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
         <div className="modal-heading"><h2 id="dialog-title">{dialog === 'project' ? '新建项目' : dialog === 'asset' ? '新建素材' : '导入素材'}</h2><IconButton icon={X} label="关闭对话框" disabled={busy} onClick={() => setDialog(null)} /></div>
         {dialog === 'project' ? <form onSubmit={event => { event.preventDefault(); run(async () => {
           const created = await api<Project>('/projects', { name: projectName.trim() });
@@ -1006,20 +1003,9 @@ export default function App() {
           <label className="field-label">素材名称<input aria-label="素材名称" autoFocus value={assetName} maxLength={100} required onChange={e => setAssetName(e.target.value)} /></label>
           <div className="property-grid"><label>宽<input aria-label="新素材宽度" type="number" min={1} max={512} value={assetWidth} required onChange={e => setAssetWidth(Number(e.target.value))} /></label><label>高<input aria-label="新素材高度" type="number" min={1} max={512} value={assetHeight} required onChange={e => setAssetHeight(Number(e.target.value))} /></label></div>
           <button className="button primary full" disabled={busy || !assetName.trim()}><FilePlus2 size={16} />创建素材</button>
-        </form> : <form onSubmit={event => { event.preventDefault(); run(async () => {
-          if (!pendingFile) return;
-          if (!await confirmDiscardCurrentDraft()) return;
-          const form = new FormData(); form.append('file', pendingFile);
-          if (sheet) { form.append('cellWidth', String(cellWidth)); form.append('cellHeight', String(cellHeight)); }
-          const response = await fetch(`/api/projects/${projectId}/assets`, { method: 'POST', body: form });
-          if (!response.ok) { const error = await response.json(); throw new Error(typeof error.detail === 'string' ? error.detail : '导入失败，请检查文件和帧尺寸'); }
-          install(await response.json()); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); setDialog(null);
-        }); }}>
-          <label className="upload-zone"><Upload size={28} /><span>{pendingFile?.name || '选择 PNG 文件'}</span><small>PNG · 最大 8 MB</small><input aria-label="素材 PNG 文件" type="file" accept="image/png" required onChange={e => setPendingFile(e.target.files?.[0] || null)} /></label>
-          <label className="checkbox-row"><input type="checkbox" checked={sheet} onChange={e => setSheet(e.target.checked)} />按 Sprite Sheet 切分</label>
-          {sheet ? <div className="property-grid"><label>单帧宽<input aria-label="单帧宽" type="number" min={1} max={512} value={cellWidth} onChange={e => setCellWidth(Number(e.target.value))} /></label><label>单帧高<input aria-label="单帧高" type="number" min={1} max={512} value={cellHeight} onChange={e => setCellHeight(Number(e.target.value))} /></label></div> : null}
-          <button className="button primary full" disabled={busy || !pendingFile}><Upload size={16} />导入</button>
-        </form>}
+        </form> : <SpriteSheetImport projectId={projectId} busy={busy} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImport={async next => {
+          install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); setTab('layers'); setDialog(null);
+        }} />}
       </section>
     </div> : null}
   </div>;
