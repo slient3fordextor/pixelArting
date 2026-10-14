@@ -233,24 +233,31 @@ select.full { margin-bottom: 10px; }
 .ai-settings { margin-top: 12px; border-top: 1px solid #e6eaeb; padding-top: 10px; }
 .ai-settings summary { display: flex; align-items: center; gap: 6px; cursor: pointer; color: #65716f; font-size: 11px; }
 .ai-settings-fields { padding-top: 10px; }
-.ai-profiles { display: grid; gap: 9px; margin-bottom: 12px; padding: 11px 12px 12px; border: 1px solid #d9e8e2; border-radius: 9px; background: linear-gradient(180deg, #fcfffd 0%, #f5faf7 100%); box-shadow: inset 0 1px #fff, 0 2px 8px #1e6f5c0b; }
-.ai-profiles .field-label { margin: 0; color: #647771; gap: 6px; }
+.ai-profiles { position: relative; isolation: isolate; display: grid; gap: 10px; overflow: hidden; margin-bottom: 12px; padding: 14px; border: 1px solid rgba(111, 200, 185, .42); border-radius: 17px; background: linear-gradient(135deg, rgba(241, 255, 251, .9), rgba(239, 244, 255, .65) 58%, rgba(250, 241, 255, .66)); box-shadow: inset 0 1px rgba(255, 255, 255, .95), inset 0 -1px rgba(93, 177, 168, .1), 0 10px 28px rgba(35, 111, 111, .11), 0 0 34px rgba(139, 112, 216, .09); backdrop-filter: blur(14px); }
+.ai-profiles::before, .ai-profiles::after { position: absolute; content: ''; pointer-events: none; z-index: 0; }
+.ai-profiles::before { inset: -32px -8px auto auto; width: 190px; height: 130px; background: radial-gradient(circle at 70% 25%, rgba(123, 220, 204, .32), transparent 47%), radial-gradient(circle at 38% 62%, rgba(173, 148, 237, .2), transparent 53%); filter: blur(7px); }
+.ai-profiles::after { inset: 0; opacity: .54; background: radial-gradient(circle at 87% 17%, rgba(255, 255, 255, .95) 0 1px, transparent 1.5px), radial-gradient(circle at 74% 31%, rgba(255, 255, 255, .8) 0 1px, transparent 1.5px), radial-gradient(circle at 94% 57%, rgba(117, 196, 186, .65) 0 1px, transparent 1.4px), radial-gradient(circle at 59% 14%, rgba(156, 132, 221, .5) 0 1px, transparent 1.4px); }
+.ai-profiles > * { position: relative; z-index: 1; }
+.ai-profiles .field-label { margin: 0; color: #466861; gap: 6px; }
+.profile-stars { position: absolute !important; top: 10px; right: 13px; display: inline-flex; align-items: center; gap: 4px; color: rgba(89, 163, 153, .72); font-size: 10px; letter-spacing: 2px; text-shadow: 0 0 9px rgba(110, 202, 190, .8); }
+.profile-stars svg { color: #6aaea4; filter: drop-shadow(0 0 4px rgba(93, 201, 184, .75)); }
 .profile-select-shell { position: relative; display: block; min-width: 0; }
 .profile-select-shell::after { content: ''; position: absolute; top: 50%; right: 12px; width: 6px; height: 6px; border-right: 1.5px solid #62837a; border-bottom: 1.5px solid #62837a; transform: translateY(-65%) rotate(45deg); pointer-events: none; transition: border-color .15s ease; }
-.profile-select { appearance: none; -webkit-appearance: none; padding: 8px 34px 8px 10px; border-color: #bfd8cf; border-radius: 7px; background: #fff; color: #2f544b; box-shadow: inset 0 1px 2px #1d4d3b0c, 0 1px 1px #1d4d3b08; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
-.profile-select:not(:disabled):hover { border-color: #91bdb0; background: #fcfffd; }
-.profile-select:focus-visible { border-color: #218f83; outline: 2px solid #218f8333; outline-offset: 1px; box-shadow: 0 0 0 3px #218f831c; }
+.profile-select { appearance: none; -webkit-appearance: none; min-height: 38px; padding: 8px 34px 8px 12px; border-color: rgba(85, 178, 164, .48); border-radius: 13px; background: linear-gradient(135deg, rgba(255, 255, 255, .73), rgba(225, 250, 245, .56)) !important; color: #214f47; box-shadow: inset 0 1px rgba(255, 255, 255, .92), 0 0 0 1px rgba(117, 205, 193, .08), 0 5px 14px rgba(39, 121, 109, .08); backdrop-filter: blur(12px); transition: border-color .18s ease, background-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.profile-select:not(:disabled):hover { border-color: rgba(50, 157, 143, .72); background: linear-gradient(135deg, rgba(255, 255, 255, .86), rgba(216, 247, 240, .68)) !important; box-shadow: inset 0 1px rgba(255, 255, 255, .96), 0 0 18px rgba(84, 191, 174, .17); transform: translateY(-1px); }
+.profile-select:focus-visible { border-color: #218f83; outline: 2px solid rgba(33, 143, 131, .72); outline-offset: 2px; box-shadow: 0 0 0 4px rgba(33, 143, 131, .18), 0 0 22px rgba(84, 191, 174, .3); }
 .profile-select-shell:focus-within::after { border-color: #218f83; }
 .profile-name-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
 .profile-name-label { min-width: 0; }
-.profile-name-input { padding: 8px 10px !important; border-color: #bfd8cf !important; border-radius: 7px !important; background: #fff; color: #2f544b !important; box-shadow: inset 0 1px 2px #1d4d3b0c, 0 1px 1px #1d4d3b08; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
-.profile-name-input:not(:disabled):hover { border-color: #91bdb0 !important; background: #fcfffd; }
-.profile-name-input:focus-visible { border-color: #218f83 !important; outline: 2px solid #218f8333; outline-offset: 1px; box-shadow: 0 0 0 3px #218f831c; }
-.profile-add-button { width: 35px; height: 35px; margin-bottom: 0; border: 1px solid #c1dbd2; border-radius: 7px; background: #f5fbf8; color: #218f83; box-shadow: inset 0 1px #fff; transition: border-color .15s ease, background-color .15s ease, color .15s ease; }
-.profile-add-button:not(:disabled):hover { border-color: #91bdb0; background: #eaf6f0; color: #176f65; }
-.profile-delete-tools { display: flex; flex-wrap: wrap; gap: 5px; }
-.profile-delete-tools .icon-button { width: 28px; height: 28px; border: 1px solid #ead2ce; border-radius: 6px; background: #fffafa; color: #a95b4f; }
-.profile-delete-tools .icon-button:not(:disabled):hover { border-color: #d9aaa2; background: #fcf0ee; color: #95483f; }
+.profile-name-input { min-height: 38px; padding: 8px 12px !important; border-color: rgba(85, 178, 164, .48) !important; border-radius: 13px !important; background: linear-gradient(135deg, rgba(255, 255, 255, .73), rgba(225, 250, 245, .56)) !important; color: #214f47 !important; box-shadow: inset 0 1px rgba(255, 255, 255, .92), 0 0 0 1px rgba(117, 205, 193, .08), 0 5px 14px rgba(39, 121, 109, .08); backdrop-filter: blur(12px); transition: border-color .18s ease, background-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.profile-name-input:not(:disabled):hover { border-color: rgba(50, 157, 143, .72) !important; background: linear-gradient(135deg, rgba(255, 255, 255, .86), rgba(216, 247, 240, .68)) !important; box-shadow: inset 0 1px rgba(255, 255, 255, .96), 0 0 18px rgba(84, 191, 174, .17); transform: translateY(-1px); }
+.profile-name-input:focus-visible { border-color: #218f83 !important; outline: 2px solid rgba(33, 143, 131, .72); outline-offset: 2px; box-shadow: 0 0 0 4px rgba(33, 143, 131, .18), 0 0 22px rgba(84, 191, 174, .3); }
+.profile-add-button { width: 38px; height: 38px; margin-bottom: 0; border: 1px solid rgba(112, 193, 177, .54); border-radius: 13px; background: rgba(235, 255, 249, .58); color: #218f83; box-shadow: inset 0 1px rgba(255, 255, 255, .9), 0 5px 14px rgba(39, 121, 109, .08); transition: border-color .18s ease, background-color .18s ease, color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.profile-add-button:not(:disabled):hover { border-color: rgba(50, 157, 143, .78); background: rgba(219, 248, 240, .8); color: #176f65; box-shadow: 0 0 17px rgba(84, 191, 174, .22); transform: translateY(-1px); }
+.profile-delete-tools { display: flex; align-items: center; gap: 8px; min-width: 0; padding-top: 1px; }
+.profile-delete-button { width: 32px; height: 32px; border: 1px solid rgba(189, 112, 104, .5); border-radius: 11px; background: rgba(255, 246, 244, .62); color: #a95b4f; box-shadow: inset 0 1px rgba(255, 255, 255, .78); }
+.profile-delete-button:not(:disabled):hover { border-color: rgba(180, 76, 66, .78); background: rgba(252, 228, 224, .88); color: #95483f; box-shadow: 0 0 16px rgba(194, 96, 86, .18); }
+.profile-delete-hint { min-width: 0; overflow-wrap: anywhere; color: #738780; font-size: 10px; line-height: 1.35; }
 .ai-actions { display: flex; gap: 8px; margin-top: 15px; }
 .ai-task { margin-top: 16px; border-top: 1px solid #e4e9e8; padding-top: 13px; }
 .ai-task > div:first-child { display: flex; align-items: center; gap: 9px; }

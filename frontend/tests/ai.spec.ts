@@ -216,7 +216,8 @@ async function mockProfiles(page: import('@playwright/test').Page) {
     if (route.request().method() === 'DELETE') {
       const index = profiles.findIndex(item => item.id === id);
       profiles.splice(index, 1);
-      return route.fulfill({ json: { deleted: true, id } });
+      if (activeId === id) activeId = profiles[0].id;
+      return route.fulfill({ json: { deleted: true, id, activeId, profile: profiles.find(item => item.id === activeId) } });
     }
     if (route.request().method() === 'PUT') {
       const body = route.request().postDataJSON();
@@ -259,7 +260,7 @@ test('AI model profiles switch text and image model requests', async ({ page, re
   expect(generationBodies.at(-1)?.model).toBe('image-b');
 });
 
-test('AI model profiles create and delete only non-active profiles', async ({ page, request }) => {
+test('AI model profiles create and delete the current profile', async ({ page, request }) => {
   await mockProfiles(page);
   await page.route('**/api/ai/generations*', route => route.fulfill({ json: [] }));
   page.on('dialog', dialog => dialog.accept());
@@ -272,12 +273,18 @@ test('AI model profiles create and delete only non-active profiles', async ({ pa
   await page.getByLabel('AI 档案名称').fill('备用服务');
   await page.getByRole('button', { name: '新建模型档案' }).click();
   await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(3);
-  await expect(page.getByRole('button', { name: '删除模型档案 本地模型' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '删除模型档案 OpenAI 主档案' })).toHaveCount(0);
-  await page.getByRole('button', { name: '删除模型档案 本地模型' }).click();
+  const deleteCurrent = page.getByRole('button', { name: '删除当前模型档案“OpenAI 主档案”' });
+  await expect(deleteCurrent).toBeVisible();
+  await expect(deleteCurrent).toBeEnabled();
+  await deleteCurrent.click();
   await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(2);
-  await page.getByLabel('AI 模型档案').selectOption({ index: 1 });
-  await expect(page.getByRole('button', { name: '删除模型档案 OpenAI 主档案' })).toBeVisible();
+  await expect(page.getByLabel('AI 模型档案')).toHaveValue('profile-b');
+  const deleteSecond = page.getByRole('button', { name: '删除当前模型档案“本地模型”' });
+  await expect(deleteSecond).toBeEnabled();
+  await deleteSecond.click();
+  await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toHaveAttribute('title', '至少保留一个模型档案，当前档案不可删除');
 });
 
 test('AI model profile API key clearing stays scoped to the active profile', async ({ page, request }) => {

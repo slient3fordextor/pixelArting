@@ -237,13 +237,25 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   }
 
   async function deleteProfile(profile: AiProfile) {
-    if (working || !profileApiAvailable || profile.id === activeProfileId || profiles.length <= 1) return;
+    if (working || !profileApiAvailable || profile.id !== activeProfileId || profiles.length <= 1) return;
     if (!window.confirm(`确定删除模型档案“${profile.name}”吗？`)) return;
     setWorking(true); setNotice(null);
     try {
-      await api<unknown>(`/ai/profiles/${encodeURIComponent(profile.id)}`, {}, 'DELETE');
-      setProfiles(list => list.filter(item => item.id !== profile.id));
-      setNotice({ text: `已删除 ${profile.name}` });
+      const result = await api<{ deleted: boolean; id: string; activeId?: string; profile?: AiProfile }>(`/ai/profiles/${encodeURIComponent(profile.id)}`, {}, 'DELETE');
+      setProfiles(list => {
+        const remaining = list.filter(item => item.id !== profile.id);
+        if (result.profile && !remaining.some(item => item.id === result.profile?.id)) remaining.push(result.profile);
+        return remaining;
+      });
+      const nextProfile = result.profile || profiles.find(item => item.id === result.activeId && item.id !== profile.id);
+      if (nextProfile && result.activeId) {
+        setActiveProfileId(result.activeId);
+        applyProfileFields(nextProfile, nextProfile.name);
+        setApiKey('');
+        setNotice({ text: `已删除 ${profile.name}，已切换到 ${nextProfile.name}` });
+      } else {
+        setNotice({ text: `已删除 ${profile.name}` });
+      }
     } catch (error) { setNotice({ text: error instanceof Error ? error.message : '模型档案删除失败', error: true }); }
     finally { setWorking(false); }
   }
@@ -365,11 +377,12 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
           <summary><Settings2 size={15} />连接设置<small>{config?.hasApiKey ? '密钥已配置' : '密钥未配置'}</small></summary>
           <div className="ai-settings-fields">
             {profileApiAvailable ? <div className="ai-profiles">
+              <span className="profile-stars" aria-hidden="true"><Sparkles size={13} /><span>✦</span><span>·</span></span>
               <label className="field-label profile-field-label">模型档案<span className="profile-select-shell"><select className="profile-select" aria-label="AI 模型档案" value={activeProfileId} disabled={working || taskActive} onChange={event => void activateProfile(event.target.value)}>
                 {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}{profile.hasApiKey ? ' · 已配置' : ' · 未配置'}</option>)}
               </select></span></label>
               <div className="profile-name-tools"><label className="field-label profile-name-label">档案名称<input className="profile-name-input" aria-label="AI 档案名称" value={profileName} disabled={working || taskActive} onChange={event => setProfileName(event.target.value)} /></label><button className="icon-button profile-add-button" type="button" title="新建模型档案" aria-label="新建模型档案" disabled={working || taskActive || configChanged} onClick={() => void createProfile()}><CopyPlus size={16} /></button></div>
-              {profiles.some(item => item.id !== activeProfileId) ? <div className="profile-delete-tools" aria-label="可删除的模型档案">{profiles.filter(item => item.id !== activeProfileId).map(profile => <button className="icon-button" key={profile.id} type="button" title={`删除模型档案 ${profile.name}`} aria-label={`删除模型档案 ${profile.name}`} disabled={working || taskActive} onClick={() => void deleteProfile(profile)}><Trash2 size={15} /></button>)}</div> : null}
+              <div className="profile-delete-tools"><button className="icon-button profile-delete-button" type="button" title={profiles.length <= 1 ? '至少保留一个模型档案，当前档案不可删除' : `删除当前模型档案“${profileName.trim() || activeProfile?.name || '未命名'}”`} aria-label={profiles.length <= 1 ? '删除当前模型档案（至少保留一个，暂不可删除）' : `删除当前模型档案“${profileName.trim() || activeProfile?.name || '未命名'}”`} disabled={working || taskActive || !activeProfile || profiles.length <= 1} onClick={() => activeProfile && void deleteProfile(activeProfile)}><Trash2 size={15} /></button><span className="profile-delete-hint">{profiles.length <= 1 ? '至少保留一个档案' : `删除当前：${profileName.trim() || activeProfile?.name || '未命名'}`}</span></div>
             </div> : null}
             <label className="field-label">OpenAI-compatible Base URL<input aria-label="AI Base URL" type="url" value={baseUrl} placeholder="https://api.openai.com/v1" onChange={event => setBaseUrl(event.target.value)} /></label>
             <label className="field-label">API Key<div className="inline-tools"><input aria-label="AI API Key" type="password" autoComplete="off" value={apiKey} placeholder={config?.hasApiKey ? '已配置，留空则保持不变' : '输入你的 API Key'} onChange={event => setApiKey(event.target.value)} /><button className="icon-button" type="button" title="删除已保存 API Key" aria-label="删除已保存 API Key" disabled={working || !config?.hasApiKey} onClick={() => void clearApiKey()}><Trash2 size={17} /></button></div></label>
