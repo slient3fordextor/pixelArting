@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Check, CircleStop, CopyPlus, Download, LoaderCircle, RefreshCw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
 import { api } from './api';
 import type { Asset } from './types';
@@ -63,6 +64,8 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   const [activeProfileId, setActiveProfileId] = useState('');
   const [profileName, setProfileName] = useState('');
   const [profileApiAvailable, setProfileApiAvailable] = useState<boolean | null>(null);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [profileHighlightIndex, setProfileHighlightIndex] = useState(0);
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [textModel, setTextModel] = useState('');
@@ -83,12 +86,14 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
+  const profileComboboxRef = useRef<HTMLDivElement>(null);
   const localBusy = useRef(false);
   const pendingHistoryUpdates = useRef<Set<string> | null>(null);
 
   const candidates = task?.result?.candidates || [];
   const selectedModel = mode === 'agent_draw' ? textModel : imageModel;
   const activeProfile = profiles.find(item => item.id === activeProfileId);
+  const profileHighlighted = profiles[profileHighlightIndex] || activeProfile;
   const configChanged = !config || Boolean(baseUrl !== config.baseUrl || textModel !== config.textModel || imageModel !== config.imageModel
     || imageSize !== (config.imageSize || '1024x1024') || maxOutputTokens !== (config.maxOutputTokens || 8192)
     || tokenLimitParameter !== (config.tokenLimitParameter || 'max_tokens') || sendImageBackground !== Boolean(config.sendImageBackground) || apiKey);
@@ -121,6 +126,20 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
     }).catch(error => { if (!cancelled) setNotice({ text: error instanceof Error ? error.message : '无法读取 AI 设置', error: true }); }));
     return () => { cancelled = true; };
   }, [open, config]);
+
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!profileComboboxRef.current?.contains(event.target as Node)) setProfileMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
+  }, [profileMenuOpen]);
+
+  useEffect(() => {
+    const activeIndex = profiles.findIndex(item => item.id === activeProfileId);
+    setProfileHighlightIndex(activeIndex >= 0 ? activeIndex : 0);
+  }, [activeProfileId, profiles]);
 
   useEffect(() => {
     setTask(null); setHistory([]); setNotice(null);
@@ -219,6 +238,57 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
       setActiveProfileId(previous);
       setNotice({ text: error instanceof Error ? error.message : '模型档案切换失败', error: true });
     } finally { setWorking(false); }
+  }
+
+  function chooseHighlightedProfile() {
+    if (!profileHighlighted) return;
+    setProfileMenuOpen(false);
+    void activateProfile(profileHighlighted.id);
+  }
+
+  function chooseProfile(id: string) {
+    setProfileHighlightIndex(Math.max(0, profiles.findIndex(item => item.id === id)));
+    setProfileMenuOpen(false);
+    void activateProfile(id);
+  }
+
+  function handleProfileTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key === 'Escape') {
+      if (profileMenuOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        setProfileMenuOpen(false);
+      }
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (profileMenuOpen) chooseHighlightedProfile();
+      else {
+        setProfileHighlightIndex(Math.max(0, profiles.findIndex(item => item.id === activeProfileId)));
+        setProfileMenuOpen(true);
+      }
+      return;
+    }
+    if (!profileMenuOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault();
+      event.stopPropagation();
+      setProfileHighlightIndex(Math.max(0, profiles.findIndex(item => item.id === activeProfileId)));
+      setProfileMenuOpen(true);
+      return;
+    }
+    if (profileMenuOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End')) {
+      event.preventDefault();
+      event.stopPropagation();
+      setProfileHighlightIndex(current => {
+        if (!profiles.length) return 0;
+        if (event.key === 'Home') return 0;
+        if (event.key === 'End') return profiles.length - 1;
+        const delta = event.key === 'ArrowDown' ? 1 : -1;
+        return (current + delta + profiles.length) % profiles.length;
+      });
+    }
   }
 
   async function createProfile() {
@@ -378,9 +448,16 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
           <div className="ai-settings-fields">
             {profileApiAvailable ? <div className="ai-profiles">
               <span className="profile-stars" aria-hidden="true"><Sparkles size={13} /><span>✦</span><span>·</span></span>
-              <label className="field-label profile-field-label">模型档案<span className="profile-select-shell"><select className="profile-select" aria-label="AI 模型档案" value={activeProfileId} disabled={working || taskActive} onChange={event => void activateProfile(event.target.value)}>
-                {profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}{profile.hasApiKey ? ' · 已配置' : ' · 未配置'}</option>)}
-              </select></span></label>
+              <div className="field-label profile-field-label"><span>模型档案</span><div ref={profileComboboxRef} className={`profile-combobox${profileMenuOpen ? ' is-open' : ''}`}>
+                <button className="profile-select profile-select-trigger" type="button" role="combobox" aria-label="AI 模型档案" aria-haspopup="listbox" aria-expanded={profileMenuOpen} aria-controls="ai-profile-listbox" aria-activedescendant={profileMenuOpen && profileHighlighted ? `ai-profile-option-${profileHighlighted.id}` : undefined} disabled={working || taskActive || !profiles.length} onClick={() => { if (!profileMenuOpen) setProfileHighlightIndex(Math.max(0, profiles.findIndex(item => item.id === activeProfileId))); setProfileMenuOpen(opened => !opened); }} onKeyDown={handleProfileTriggerKeyDown}>
+                  <span className="profile-trigger-copy"><strong>{activeProfile?.name || '选择模型档案'}</strong><small>{activeProfile?.hasApiKey ? '已配置' : '未配置'}</small></span><span className="profile-trigger-chevron" aria-hidden="true" />
+                </button>
+                {profileMenuOpen ? <div className="profile-menu" id="ai-profile-listbox" role="listbox" aria-label="模型档案选项">
+                  {profiles.map((profile, index) => <div className={`profile-option${profile.id === activeProfileId ? ' is-current' : ''}${index === profileHighlightIndex ? ' is-highlighted' : ''}`} id={`ai-profile-option-${profile.id}`} key={profile.id} role="option" aria-selected={profile.id === activeProfileId} onMouseEnter={() => setProfileHighlightIndex(index)} onMouseDown={event => event.preventDefault()} onClick={() => chooseProfile(profile.id)}>
+                    <span className="profile-option-copy"><strong>{profile.name}</strong><small>{profile.hasApiKey ? '已配置' : '未配置'}</small></span>{profile.id === activeProfileId ? <Check className="profile-option-check" size={15} aria-hidden="true" /> : null}
+                  </div>)}
+                </div> : null}
+              </div></div>
               <div className="profile-name-tools"><label className="field-label profile-name-label">档案名称<input className="profile-name-input" aria-label="AI 档案名称" value={profileName} disabled={working || taskActive} onChange={event => setProfileName(event.target.value)} /></label><button className="icon-button profile-add-button" type="button" title="新建模型档案" aria-label="新建模型档案" disabled={working || taskActive || configChanged} onClick={() => void createProfile()}><CopyPlus size={16} /></button></div>
               <div className="profile-delete-tools"><button className="icon-button profile-delete-button" type="button" title={profiles.length <= 1 ? '至少保留一个模型档案，当前档案不可删除' : `删除当前模型档案“${profileName.trim() || activeProfile?.name || '未命名'}”`} aria-label={profiles.length <= 1 ? '删除当前模型档案（至少保留一个，暂不可删除）' : `删除当前模型档案“${profileName.trim() || activeProfile?.name || '未命名'}”`} disabled={working || taskActive || !activeProfile || profiles.length <= 1} onClick={() => activeProfile && void deleteProfile(activeProfile)}><Trash2 size={15} /></button><span className="profile-delete-hint">{profiles.length <= 1 ? '至少保留一个档案' : `删除当前：${profileName.trim() || activeProfile?.name || '未命名'}`}</span></div>
             </div> : null}

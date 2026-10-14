@@ -232,6 +232,11 @@ async function mockProfiles(page: import('@playwright/test').Page) {
   return { profiles, get activeId() { return activeId; } };
 }
 
+async function selectProfile(page: import('@playwright/test').Page, profileName: string) {
+  await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
+  await page.getByRole('option', { name: new RegExp(`^${profileName}`) }).click();
+}
+
 test('AI model profiles switch text and image model requests', async ({ page, request }) => {
   await mockProfiles(page);
   const generationBodies: Record<string, unknown>[] = [];
@@ -246,11 +251,11 @@ test('AI model profiles switch text and image model requests', async ({ page, re
   await page.getByLabel('项目', { exact: true }).selectOption(project.id);
   await page.getByRole('button', { name: 'AI 生成', exact: true }).click();
   await page.locator('.ai-settings > summary').click();
-  await expect(page.getByLabel('AI 模型档案')).toHaveValue('profile-a');
+  await expect(page.getByRole('combobox', { name: 'AI 模型档案' })).toContainText('OpenAI 主档案');
   await page.getByLabel('AI 生成描述').fill('档案 A 的像素角色');
   await page.getByRole('button', { name: '开始生成', exact: true }).click();
   expect(generationBodies.at(-1)?.model).toBe('text-a');
-  await page.getByLabel('AI 模型档案').selectOption('profile-b');
+  await selectProfile(page, '本地模型');
   await expect(page.getByLabel('AI 文本模型')).toHaveValue('text-b');
   await expect(page.getByLabel('AI 图像模型')).toHaveValue('image-b');
   await page.getByRole('button', { name: '开始生成', exact: true }).click();
@@ -272,17 +277,23 @@ test('AI model profiles create and delete the current profile', async ({ page, r
   await page.locator('.ai-settings > summary').click();
   await page.getByLabel('AI 档案名称').fill('备用服务');
   await page.getByRole('button', { name: '新建模型档案' }).click();
-  await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(3);
+  await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
+  await expect(page.getByRole('option')).toHaveCount(3);
+  await page.keyboard.press('Escape');
   const deleteCurrent = page.getByRole('button', { name: '删除当前模型档案“OpenAI 主档案”' });
   await expect(deleteCurrent).toBeVisible();
   await expect(deleteCurrent).toBeEnabled();
   await deleteCurrent.click();
-  await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(2);
-  await expect(page.getByLabel('AI 模型档案')).toHaveValue('profile-b');
+  await expect(page.getByRole('combobox', { name: 'AI 模型档案' })).toContainText('本地模型');
+  await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
+  await expect(page.getByRole('option')).toHaveCount(2);
+  await page.keyboard.press('Escape');
   const deleteSecond = page.getByRole('button', { name: '删除当前模型档案“本地模型”' });
   await expect(deleteSecond).toBeEnabled();
   await deleteSecond.click();
-  await expect(page.getByLabel('AI 模型档案').locator('option')).toHaveCount(1);
+  await page.getByRole('combobox', { name: 'AI 模型档案' }).click();
+  await expect(page.getByRole('option')).toHaveCount(1);
+  await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toBeDisabled();
   await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toHaveAttribute('title', '至少保留一个模型档案，当前档案不可删除');
 });
@@ -298,7 +309,7 @@ test('AI model profile API key clearing stays scoped to the active profile', asy
   await page.locator('.ai-settings > summary').click();
   await page.getByRole('button', { name: '删除已保存 API Key' }).click();
   await expect(page.locator('.ai-settings')).toContainText('密钥未配置');
-  await page.getByLabel('AI 模型档案').selectOption('profile-b');
+  await selectProfile(page, '本地模型');
   await expect(page.locator('.ai-settings')).toContainText('密钥已配置');
   expect(fixture.profiles.find(profile => profile.id === 'profile-a')?.hasApiKey).toBe(false);
   expect(fixture.profiles.find(profile => profile.id === 'profile-b')?.hasApiKey).toBe(true);
