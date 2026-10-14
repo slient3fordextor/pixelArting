@@ -19,7 +19,14 @@ export type CheckConfig = {
 };
 export type Finding = { id: string; ruleId: string; severity: string; frameId: string | null; message: string; region: { x: number; y: number; width: number; height: number } | null; fixIds: string[] };
 export type Report = { id?: string; assetVersionId?: string; created?: string; config?: CheckConfig; findings: Finding[]; rules: { ruleId: string; status: string; reason: string | null }[]; colorCount: number; frameCount: number };
-export type Preview = { previewId: string; document: Document; changes: { frameId: string; changedPixels: number | null; before: number[]; after: number[] }[]; report: Report };
+export type RepairAction = { id: string; alphaThreshold: number; offsetX: number; offsetY: number };
+export type FrameMetadata = Pick<Frame, 'origin' | 'baselineY' | 'collisionRects'>;
+export type FrameChange = {
+  frameId: string; changedPixels: number | null; before: number[]; after: number[];
+  changedBounds: { x: number; y: number; width: number; height: number } | null;
+  metadataBefore: FrameMetadata; metadataAfter: FrameMetadata; metadataChanged: boolean;
+};
+export type Preview = { previewId: string; baseVersionId: string; actions: RepairAction[]; document: Document; changes: FrameChange[]; report: Report };
 export const RULE_NAMES: Record<string, string> = {
   'size.grid': '画布尺寸', 'palette.limit': '颜色数量', 'palette.membership': '调色板一致性',
   'transparency.halo': '半透明像素', 'animation.structure': '动画结构',
