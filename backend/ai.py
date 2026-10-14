@@ -257,4 +257,3 @@ class OpenAICompatibleProvider:
             "calledExternally": True,
             "candidates": candidates,
         }
-

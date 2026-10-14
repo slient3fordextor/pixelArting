@@ -352,4 +352,3 @@ def test_project_delete_cleans_ai_tasks(client):
     assert response.status_code == 200
     assert client.get(f'/api/ai/generations/{task["id"]}').status_code == 404
     assert client.get("/api/ai/config").json()["hasApiKey"] is True
-
