@@ -144,6 +144,29 @@ test('first-phase pixel tools draw shapes, fill pixels and expose selection cont
   await expect(page.getByRole('button', { name: '移动画布 (H)', exact: true })).toBeVisible();
 });
 
+test('keyboard shortcuts switch tools and undo canvas edits', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  const canvas = page.getByLabel('像素编辑画布');
+  await expect(canvas).toBeVisible();
+  const rect = await canvas.boundingBox();
+  expect(rect).not.toBeNull();
+  const point = (x: number, y: number) => ({ x: rect!.x + rect!.width * (x + 0.5) / 64, y: rect!.y + rect!.height * (y + 0.5) / 64 });
+
+  await page.keyboard.press('e');
+  await expect(page.getByRole('button', { name: '橡皮 (E)', exact: true })).toHaveClass(/active/);
+  await page.keyboard.press('b');
+  await expect(page.getByRole('button', { name: '铅笔 (B)', exact: true })).toHaveClass(/active/);
+
+  const before = await canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data));
+  await page.mouse.click(point(2, 2).x, point(2, 2).y);
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data))).not.toEqual(before);
+  await page.keyboard.press('Control+Z');
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data))).toEqual(before);
+  await page.keyboard.press('Control+Shift+Z');
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data))).not.toEqual(before);
+});
+
 test('blank assets, image layers and context menus preserve editing protections', async ({ page, request }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/');
@@ -417,4 +440,32 @@ test('frame guides respond immediately and layer dragging preserves other layers
   await drag([15, 13], [20, 13]);
   expect(await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL())).toBe(locked);
   await page.screenshot({ path: '/tmp/pixelarting-layer-move-guides.png', fullPage: true });
+});
+
+test('frame timeline switches frames and previews unassigned sequences', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  const canvas = page.getByLabel('像素编辑画布');
+  await expect(canvas).toBeVisible();
+  await page.getByRole('button', { name: '新建素材', exact: true }).click();
+  await page.getByLabel('素材名称').fill('时间轴回归素材');
+  await page.getByRole('button', { name: '创建素材', exact: true }).click();
+  await expect(page.locator('.frame-item')).toHaveCount(1);
+  const rect = await canvas.boundingBox();
+  expect(rect).not.toBeNull();
+  const point = (x: number, y: number) => ({ x: rect!.x + rect!.width * (x + 0.5) / 64, y: rect!.y + rect!.height * (y + 0.5) / 64 });
+
+  await page.getByRole('button', { name: '复制当前帧', exact: true }).click();
+  await expect(page.locator('.frame-item')).toHaveCount(2);
+  await page.mouse.click(point(6, 6).x, point(6, 6).y);
+  const filled = await canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(6, 6, 1, 1).data));
+  await page.locator('.frame-item').first().click();
+  await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(6, 6, 1, 1).data))).not.toEqual(filled);
+
+  const play = page.getByRole('button', { name: '播放动画', exact: true });
+  await expect(play).toBeEnabled();
+  await page.getByLabel('帧时长').fill('600');
+  await play.click();
+  await expect.poll(() => page.locator('.frame-item.selected').getAttribute('aria-label'), { timeout: 1000 }).toBe('第 2 帧');
+  await page.getByRole('button', { name: '暂停', exact: true }).click();
 });

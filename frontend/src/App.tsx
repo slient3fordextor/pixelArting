@@ -33,6 +33,10 @@ type StoredDraft = {
   updatedAt: string;
 };
 
+function isTextEditingTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement && target.matches('input, textarea, select, [contenteditable="true"]');
+}
+
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
@@ -193,16 +197,22 @@ export default function App() {
   useEffect(() => {
     if (!playing || !draft) return;
     const animation = draft.animations.find(a => a.action === action && a.direction === direction);
-    if (!animation) { setPlaying(false); return; }
-    const current = animation.frames.findIndex(ref => ref.frameId === draft.frames[frameIndex]?.id);
-    const index = current < 0 ? 0 : current;
-    const timer = setTimeout(() => {
-      if (!animation.loop && index === animation.frames.length - 1) { setPlaying(false); return; }
-      const next = animation.frames[(index + 1) % animation.frames.length];
-      setFrameIndex(draft.frames.findIndex(f => f.id === next.frameId));
-    }, animation.frames[index].durationMs);
+    const sequence = animation?.frames ?? draft.frames.map(frame => ({ frameId: frame.id, durationMs: duration }));
+    if (!sequence.length) { setPlaying(false); return; }
+    let index = Math.max(0, sequence.findIndex(ref => ref.frameId === draft.frames[latestFrameIndex.current]?.id));
+    let timer: ReturnType<typeof setTimeout>;
+    // Keep a sequence cursor: animations may reference the same frame more than once.
+    const advance = () => {
+      timer = setTimeout(() => {
+        if (animation && !animation.loop && index === sequence.length - 1) { setPlaying(false); return; }
+        index = (index + 1) % sequence.length;
+        setFrameIndex(draft.frames.findIndex(frame => frame.id === sequence[index].frameId));
+        advance();
+      }, sequence[index].durationMs);
+    };
+    advance();
     return () => clearTimeout(timer);
-  }, [playing, draft, frameIndex, action, direction]);
+  }, [playing, draft, action, direction]);
 
   async function run(task: () => Promise<void>, success?: string) {
     setBusy(true);
@@ -224,6 +234,8 @@ export default function App() {
     setAsset(next); setDraft(recoveredDocument); setSelectedLayer(recoveredLayer);
     setAssets(list => list.map(item => item.id === next.id ? { ...item, name: next.name, currentVersionId: next.currentVersionId, frameCount: next.document.frames.length, layerCount: next.document.layers.length, width: next.document.frames[0].width, height: next.document.frames[0].height } : item));
     setFrameIndex(recoveredFrame); setDirty(Boolean(recovered)); setDraftStatus(recovered ? 'saved' : 'none'); setUndo([]); setRedo([]); setReport(null); setFinding(null); setPreview(null); setPlaying(false); setMenu(null);
+    setAction(recoveredDocument.animations[0]?.action ?? 'idle');
+    setDirection(recoveredDocument.animations[0]?.direction ?? 'down');
     if (recovered) setNotice({ message: '已恢复未保存草稿；点击“保存”后才会写入正式版本', error: false });
   }
 
@@ -406,17 +418,23 @@ export default function App() {
   }
 
   function duplicateFrame(index: number) {
-    if (!draft || draft.frames.length >= 64) return;
+    if (!draft || locked || draft.frames.length >= 64) return;
     edit(document => {
       const copy = structuredClone(document.frames[index]);
+      const sourceId = copy.id;
       copy.id = `frame_${crypto.randomUUID().replaceAll('-', '')}`;
       document.frames.splice(index + 1, 0, copy);
+      const animation = document.animations.find(a => a.action === action && a.direction === direction);
+      const refIndex = animation?.frames.findIndex(ref => ref.frameId === sourceId) ?? -1;
+      if (animation && refIndex >= 0 && animation.frames.length < 128) {
+        animation.frames.splice(refIndex + 1, 0, { ...animation.frames[refIndex], frameId: copy.id });
+      }
     });
     setFrameIndex(index + 1);
   }
 
   function deleteFrame(index: number) {
-    if (!draft || draft.frames.length <= 1) return;
+    if (!draft || locked || draft.frames.length <= 1) return;
     edit(document => {
       const id = document.frames[index].id;
       document.frames.splice(index, 1);
@@ -432,6 +450,10 @@ export default function App() {
     const selectedId = draft.frames[frameIndex]?.id;
     edit(document => {
       [document.frames[index], document.frames[nextIndex]] = [document.frames[nextIndex], document.frames[index]];
+      const order = new Map(document.frames.map((frame, position) => [frame.id, position]));
+      for (const animation of document.animations) {
+        animation.frames.sort((a, b) => order.get(a.frameId)! - order.get(b.frameId)!);
+      }
     });
     if (selectedId === draft.frames[index].id) setFrameIndex(nextIndex);
     else if (selectedId === draft.frames[nextIndex].id) setFrameIndex(index);
@@ -488,30 +510,108 @@ export default function App() {
   const currentAnimation = draft?.animations.find(a => a.action === action && a.direction === direction);
   const currentRef = currentAnimation?.frames.find(ref => ref.frameId === frame?.id);
   const locked = busy || !!preview || playing;
+  const validDuration = Number.isInteger(duration) && duration >= 1 && duration <= 60000;
   useEffect(() => {
     setDuration(currentRef?.durationMs ?? 200);
   }, [action, direction, frame?.id, currentRef?.durationMs]);
+
+  function selectAnimation(nextAction: typeof action, nextDirection: Direction) {
+    setPlaying(false); setAction(nextAction); setDirection(nextDirection);
+    const animation = draft?.animations.find(a => a.action === nextAction && a.direction === nextDirection);
+    if (animation && draft) setFrameIndex(draft.frames.findIndex(frame => frame.id === animation.frames[0].frameId));
+  }
+
+  function togglePlayback() {
+    if (playing) { setPlaying(false); return; }
+    if (!draft || busy || preview || (!currentAnimation && !validDuration)) return;
+    const firstId = currentAnimation?.frames[0].frameId ?? draft.frames[0].id;
+    setFrameIndex(draft.frames.findIndex(frame => frame.id === firstId));
+    setPlaying(true);
+  }
+
+  function updateAnimationFrame() {
+    if (!frame || !validDuration) return;
+    edit(document => {
+      document.type = 'character';
+      let animation = document.animations.find(a => a.action === action && a.direction === direction);
+      if (!animation) {
+        animation = { action, direction, loop: true, frames: [] };
+        document.animations.push(animation);
+      }
+      const ref = animation.frames.find(ref => ref.frameId === frame.id);
+      if (ref) ref.durationMs = duration;
+      else {
+        animation.frames.push({ frameId: frame.id, durationMs: duration });
+        const order = new Map(document.frames.map((frame, index) => [frame.id, index]));
+        animation.frames.sort((a, b) => order.get(a.frameId)! - order.get(b.frameId)!);
+      }
+    });
+  }
   const menuLayer = draft?.layers.find(layer => layer.id === menu?.layerId);
   const menuLayerIndex = draft?.layers.findIndex(layer => layer.id === menuLayer?.id) ?? -1;
   useEffect(() => {
     const command = (event: Event) => {
       const name = (event as CustomEvent<string>).detail;
       setMenu(null);
+      const textEditing = isTextEditingTarget(document.activeElement);
+      if (name === 'copy') {
+        if (textEditing) document.execCommand('copy');
+        else canvasEditorRef.current?.copySelection();
+        return;
+      }
+      if (name === 'cut') {
+        if (textEditing) document.execCommand('cut');
+        else if (!locked) canvasEditorRef.current?.cutSelection();
+        return;
+      }
+      if (name === 'paste') {
+        if (textEditing) document.execCommand('paste');
+        else if (!locked) canvasEditorRef.current?.pasteSelection();
+        return;
+      }
       if (locked) return;
       if (name === 'new-asset' && projectId) setDialog('asset');
       if (name === 'open' && projectId) openUpload();
       if (name === 'save' && draft) run(saveDraft, '版本已保存');
+      if (name === 'undo') {
+        if (textEditing) document.execCommand('undo');
+        else undoEdit();
+      }
+      if (name === 'redo') {
+        if (textEditing) document.execCommand('redo');
+        else redoEdit();
+      }
+      if (name.startsWith('tool:')) {
+        if (textEditing) return;
+        const next = name.slice(5) as DrawingTool;
+        if (['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'select', 'pan', 'move-layer'].includes(next)) setTool(next);
+      }
     };
     window.addEventListener('pixelart-command', command);
     return () => window.removeEventListener('pixelart-command', command);
-  }, [locked, projectId, draft, asset, frameIndex, selectedLayer]);
+  }, [locked, projectId, draft, asset, frameIndex, selectedLayer, undo, redo, selection]);
   useEffect(() => {
     const shortcuts: Record<string, DrawingTool> = { b: 'pencil', e: 'eraser', i: 'eyedropper', g: 'fill', l: 'line', r: 'rectangle', o: 'ellipse', m: 'select', h: 'pan', v: 'move-layer' };
     const handler = (event: KeyboardEvent) => {
-      if ((event.target as HTMLElement).closest('input, textarea, select')) return;
+      if (isTextEditingTarget(event.target)) return;
       const modifier = event.ctrlKey || event.metaKey;
       if (modifier && !event.altKey) {
         const command = event.key.toLowerCase();
+        if (command === 's' && !locked && draft) {
+          event.preventDefault();
+          void run(saveDraft, '版本已保存');
+          return;
+        }
+        if (command === 'n' && !locked && projectId) {
+          event.preventDefault();
+          setDialog('asset');
+          return;
+        }
+        if (command === 'o' && !locked && projectId) {
+          event.preventDefault();
+          openUpload();
+          return;
+        }
         if ((command === 'z' || command === 'y') && !locked) {
           event.preventDefault();
           if (command === 'y' || event.shiftKey) redoEdit();
@@ -532,7 +632,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [locked, selection, undo, redo, draft, frameIndex, selectedLayer]);
+  }, [locked, projectId, selection, undo, redo, draft, frameIndex, selectedLayer]);
   let menuItems: MenuItem[] = [];
   if (menu?.kind === 'library') menuItems = [
     { label: '新建素材', icon: FilePlus2, disabled: locked || !projectId, action: () => setDialog('asset') },
@@ -651,9 +751,9 @@ export default function App() {
         {preview ? <div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div> : null}
         <DrawingPalette colorRef={colorRef} palette={config.palette} pickedColor={pickedColor} />
         <section className="timeline">
-          <div className="timeline-heading"><div><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!currentAnimation || !!preview || busy} active={playing} onClick={() => { if (!playing && currentAnimation) setFrameIndex(draft.frames.findIndex(f => f.id === currentAnimation.frames[0].frameId)); setPlaying(v => !v); }} /><span>帧时间轴</span><small>{draft.frames.length} 帧</small></div><div><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></div></div>
-          <div className="frame-list">{draft.frames.map((f, i) => { const mapped = currentAnimation?.frames.find(ref => ref.frameId === f.id); return <button key={f.id} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">{mapped.durationMs} ms</small> : null}</button>; })}</div>
-          <div className="animation-controls"><select aria-label="动作" value={action} onChange={e => setAction(e.target.value as 'idle' | 'walk')}><option value="idle">idle</option><option value="walk">walk</option></select><select aria-label="方向" value={direction} onChange={e => setDirection(e.target.value as Direction)}>{Object.entries(directionNames).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select><label><input aria-label="帧时长" type="number" min={1} max={60000} value={duration} onChange={e => setDuration(Number(e.target.value))} /> ms</label><button className="button secondary" disabled={locked || duration < 1 || duration > 60000} onClick={() => edit(document => { document.type = 'character'; let animation = document.animations.find(a => a.action === action && a.direction === direction); if (!animation) { animation = { action, direction, loop: true, frames: [] }; document.animations.push(animation); } const ref = animation.frames.find(f => f.frameId === frame.id); if (ref) ref.durationMs = duration; else animation.frames.push({ frameId: frame.id, durationMs: duration }); })}>{currentRef ? '更新时长' : '加入动画'}</button><span className="mapping-count">{currentAnimation?.frames.length || 0} 帧</span></div>
+          <div className="timeline-heading"><div><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><span>帧时间轴</span><small>{draft.frames.length} 帧</small></div><div><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></div></div>
+          <div className="frame-list">{draft.frames.map((f, i) => { const mapped = currentAnimation?.frames.find(ref => ref.frameId === f.id); return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">{mapped.durationMs} ms</small> : null}</button>; })}</div>
+          <div className="animation-controls"><select aria-label="动作" value={action} disabled={busy || !!preview} onChange={e => selectAnimation(e.target.value as typeof action, direction)}><option value="idle">idle</option><option value="walk">walk</option></select><select aria-label="方向" value={direction} disabled={busy || !!preview} onChange={e => selectAnimation(action, e.target.value as Direction)}>{Object.entries(directionNames).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select><label><input aria-label="帧时长" type="number" min={1} max={60000} step={1} value={duration} disabled={locked} onChange={e => setDuration(Number(e.target.value))} /> ms</label><button className="button secondary" disabled={locked || !validDuration || (!currentRef && (currentAnimation?.frames.length ?? 0) >= 128)} onClick={updateAnimationFrame}>{currentRef ? '更新时长' : '加入动画'}</button><span className="mapping-count">{currentAnimation?.frames.length || 0} 帧</span></div>
         </section>
       </> : <div className="empty-workbench"><ImagePlus size={42} /><h1>素材工作台</h1><div className="inline-tools"><button className="button primary" disabled={!projectId || busy} onClick={() => setDialog('asset')}><FilePlus2 size={16} />新建素材</button><button className="button secondary" disabled={!projectId || busy} onClick={openUpload}><Upload size={16} />上传 PNG</button></div></div>}
     </main>

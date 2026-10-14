@@ -10,7 +10,19 @@ let backend, mainWindow, closing = false;
 
 function command(name) {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.executeJavaScript(`window.dispatchEvent(new CustomEvent('pixelart-command', { detail: ${JSON.stringify(name)} }))`).catch(() => {});
+    const dispatch = () => mainWindow.webContents.executeJavaScript(`window.dispatchEvent(new CustomEvent('pixelart-command', { detail: ${JSON.stringify(name)} }))`).catch(() => {});
+    if (name === 'copy' || name === 'cut' || name === 'paste') {
+      mainWindow.webContents.executeJavaScript('Boolean(document.activeElement?.matches(\'input, textarea, select, [contenteditable="true"]\'))')
+        .then(textEditing => {
+          if (!textEditing) { dispatch(); return; }
+          if (name === 'copy') mainWindow.webContents.copy();
+          if (name === 'cut') mainWindow.webContents.cut();
+          if (name === 'paste') mainWindow.webContents.paste();
+        })
+        .catch(dispatch);
+      return;
+    }
+    dispatch();
   }
 }
 
@@ -23,8 +35,26 @@ function menu() {
       { type: 'separator' }, { label: '关闭窗口', accelerator: 'Alt+F4', click: () => mainWindow?.close() },
     ] },
     { label: '编辑', submenu: [
-      { role: 'undo', label: '撤销文本' }, { role: 'redo', label: '重做文本' }, { type: 'separator' },
-      { role: 'cut', label: '剪切' }, { role: 'copy', label: '复制' }, { role: 'paste', label: '粘贴' }, { role: 'selectAll', label: '全选' },
+      { label: '撤销', accelerator: 'CmdOrCtrl+Z', click: () => command('undo') },
+      { label: '重做', accelerator: 'CmdOrCtrl+Shift+Z', click: () => command('redo') },
+      { label: '重做（替代快捷键）', accelerator: 'CmdOrCtrl+Y', click: () => command('redo') }, { type: 'separator' },
+      // Let the renderer route these keys between native text editing and canvas selection.
+      { label: '剪切', accelerator: 'CmdOrCtrl+X', registerAccelerator: false, click: () => command('cut') },
+      { label: '复制', accelerator: 'CmdOrCtrl+C', registerAccelerator: false, click: () => command('copy') },
+      { label: '粘贴', accelerator: 'CmdOrCtrl+V', registerAccelerator: false, click: () => command('paste') },
+      { role: 'selectAll', label: '全选', registerAccelerator: false },
+    ] },
+    { label: '工具', submenu: [
+      { label: '铅笔', accelerator: 'B', registerAccelerator: false, click: () => command('tool:pencil') },
+      { label: '橡皮', accelerator: 'E', registerAccelerator: false, click: () => command('tool:eraser') },
+      { label: '取色器', accelerator: 'I', registerAccelerator: false, click: () => command('tool:eyedropper') },
+      { label: '填充', accelerator: 'G', registerAccelerator: false, click: () => command('tool:fill') },
+      { label: '直线', accelerator: 'L', registerAccelerator: false, click: () => command('tool:line') },
+      { label: '矩形', accelerator: 'R', registerAccelerator: false, click: () => command('tool:rectangle') },
+      { label: '椭圆', accelerator: 'O', registerAccelerator: false, click: () => command('tool:ellipse') },
+      { label: '矩形选区', accelerator: 'M', registerAccelerator: false, click: () => command('tool:select') },
+      { label: '移动画布', accelerator: 'H', registerAccelerator: false, click: () => command('tool:pan') },
+      { label: '移动图层', accelerator: 'V', registerAccelerator: false, click: () => command('tool:move-layer') },
     ] },
     { label: '窗口', submenu: [{ role: 'minimize', label: '最小化' }, { role: 'togglefullscreen', label: '全屏' }] },
   ]);
