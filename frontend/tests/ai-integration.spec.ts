@@ -61,7 +61,7 @@ async function configure(page: Page) {
   await page.getByLabel('AI 候选数量').fill('1');
 }
 
-test('text model commands render candidates and import editable layers only after confirmation', async ({ page, request }, testInfo) => {
+test('text model commands render candidates and import editable layers only after confirmation', async ({ page, request }) => {
   failText = false;
   await page.setViewportSize({ width: 1440, height: 1000 });
   const project = await (await request.post('/api/projects', { data: { name: 'AI 工具完整流程' } })).json();
@@ -74,7 +74,6 @@ test('text model commands render candidates and import editable layers only afte
   await expect.poll(() => page.locator('.ai-candidate img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(8);
   expect((await request.get(`/api/projects/${project.id}/assets`)).ok()).toBe(true);
   expect(await (await request.get(`/api/projects/${project.id}/assets`)).json()).toHaveLength(0);
-  await page.screenshot({ path: testInfo.outputPath('ai-desktop.png') });
   await page.getByRole('button', { name: '选择并导入', exact: true }).click();
   await expect(page.locator('.ai-notice')).toContainText('候选已导入');
   const items = await (await request.get(`/api/projects/${project.id}/assets`)).json();
@@ -91,7 +90,7 @@ test('text model commands render candidates and import editable layers only afte
   expect(calls.at(-1)).toMatchObject({ path: '/v1/chat/completions', model: 'fixture-text-model', authorized: true });
 });
 
-test('image model PNG candidates are resized into the requested pixel canvas', async ({ page, request }, testInfo) => {
+test('image model PNG candidates are resized into the requested pixel canvas', async ({ page, request }) => {
   const project = await (await request.post('/api/projects', { data: { name: 'AI 图片完整流程' } })).json();
   await page.goto('/');
   imageData = await page.evaluate(() => {
@@ -108,7 +107,6 @@ test('image model PNG candidates are resized into the requested pixel canvas', a
   await expect(page.locator('.ai-candidate img')).toHaveCount(1);
   await expect.poll(() => page.locator('.ai-candidate img').evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(8);
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: testInfo.outputPath('ai-mobile.png') });
   expect(await page.locator('.ai-modal').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.getByRole('button', { name: '选择并导入', exact: true }).click();
   await expect(page.locator('.ai-notice')).toContainText('候选已导入');

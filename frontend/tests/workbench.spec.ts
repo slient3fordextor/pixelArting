@@ -15,7 +15,6 @@ test('multilayer editing, persistence, quality checks and repair preview', async
     for (let index = 3; index < data.length; index += 4) if (data[index] > 0) count++;
     return count;
   })).toBeGreaterThan(100);
-  await page.screenshot({ path: '/tmp/pixelarting-desktop.png', fullPage: true });
 
   const count = await page.locator('.layer-row').count();
   await page.getByRole('button', { name: '新建图层', exact: true }).click();
@@ -58,7 +57,6 @@ test('mobile layout keeps canvas and import controls available', async ({ page }
   await expect(page.getByRole('button', { name: '上传 PNG 或 Sprite Sheet', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '新建项目', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: '/tmp/pixelarting-mobile.png', fullPage: true });
   await page.getByRole('button', { name: '上传 PNG 或 Sprite Sheet', exact: true }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
 });
@@ -349,7 +347,6 @@ test('blank assets, image layers and context menus preserve editing protections'
   const bounds = await menu.boundingBox();
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(1440);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(1000);
-  await page.screenshot({ path: '/tmp/pixelarting-context-menu.png' });
   await page.keyboard.press('ArrowDown');
   await expect(page.getByRole('menuitem', { name: '导入 PNG / Sprite Sheet', exact: true })).toBeFocused();
   await page.locator('.brand').click();
@@ -376,7 +373,6 @@ test('all assets show actual previews and deletion requires confirmation', async
   await page.reload();
   await expect(page.locator('.asset-row')).toHaveCount(count - 1);
   await expect(page.getByRole('button', { name: '删除素材 自定义素材', exact: true })).toHaveCount(0);
-  await page.screenshot({ path: '/tmp/pixelarting-asset-previews.png', fullPage: true });
 
   await page.getByRole('button', { name: '新建项目', exact: true }).click();
   await page.getByLabel('项目名称').fill('删除空项目验证');
@@ -437,7 +433,6 @@ test('asset and empty-library menus support snapshot copy, paste and rename', as
   expect(editingBounds.width).toBe(normalBounds!.width);
   expect(editingBounds.height).toBe(normalBounds!.height);
   expect(await renameInput.evaluate((element: HTMLInputElement) => [element.selectionStart, element.selectionEnd])).toEqual([0, 4]);
-  await page.screenshot({ path: '/tmp/pixelarting-asset-rename.png' });
   for (const viewport of [{ width: 1000, height: 800 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
     await renameInput.scrollIntoViewIfNeeded();
@@ -451,7 +446,6 @@ test('asset and empty-library menus support snapshot copy, paste and rename', as
     });
     expect(geometry.inside).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await page.screenshot({ path: `/tmp/pixelarting-asset-rename-${viewport.width}.png`, fullPage: true });
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
   await renameInput.fill('不提交的名字');
@@ -555,7 +549,6 @@ test('frame guides respond immediately and layer dragging preserves other layers
   const locked = await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL());
   await drag([15, 13], [20, 13]);
   expect(await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL())).toBe(locked);
-  await page.screenshot({ path: '/tmp/pixelarting-layer-move-guides.png', fullPage: true });
 });
 
 test('frame timeline switches frames and previews unassigned sequences', async ({ page }) => {
@@ -650,10 +643,8 @@ test('animation sequences keep independent order, loop settings and blank frame 
   await page.reload();
   await expect(page.locator('.animation-step')).toHaveCount(3);
   await expect(page.getByLabel('循环播放')).not.toBeChecked();
-  await page.screenshot({ path: '/tmp/pixelarting-independent-animation.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.screenshot({ path: '/tmp/pixelarting-independent-animation-mobile.png', fullPage: true });
 });
 
 test('removing animation references and deleting actions preserve source frames and other actions', async ({ page, request }) => {

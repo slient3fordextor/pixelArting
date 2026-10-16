@@ -31,7 +31,6 @@ test('sheet preview, mapping and unsaved confirmation integrate with the editor'
   await expect(page.getByLabel('第 1 行动作方向')).toHaveValue('walk:down');
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.screenshot({ path: '/tmp/pixelarting-integrated-import-mobile.png', fullPage: true });
   await page.getByRole('button', { name: '确认导入', exact: true }).click();
   await page.getByRole('button', { name: '保存后继续', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);

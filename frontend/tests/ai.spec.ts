@@ -61,7 +61,6 @@ test('AI settings protect credentials and both modes display actual candidates',
   expect(generationBodies[1].model).toBe('user-image-model');
   const privateBrowserData = await page.evaluate(() => `${JSON.stringify(localStorage)}${JSON.stringify(sessionStorage)}`);
   expect(privateBrowserData).not.toContain('private-test-key');
-  await page.screenshot({ path: '/tmp/pixelarting-ai-desktop.png', fullPage: true });
 
   const projectId = generationBodies[1].projectId;
   await page.route('**/api/ai/generations/generation-2/select', async route => {
@@ -108,7 +107,6 @@ test('AI failed tasks can retry and queued tasks can cancel on a mobile viewport
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const bounds = await page.getByRole('dialog', { name: 'AI 素材生成' }).boundingBox();
   expect(bounds!.width).toBeLessThanOrEqual(390);
-  await page.screenshot({ path: '/tmp/pixelarting-ai-mobile.png', fullPage: true });
   await page.getByRole('button', { name: '重试原任务', exact: true }).click();
   await expect(page.getByLabel('AI 生成状态')).toContainText('排队中');
   await page.getByRole('button', { name: '取消', exact: true }).click();
