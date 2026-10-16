@@ -138,13 +138,22 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
     }
   }}>
     <div className="palette-strip">
-      <label className="color-input" title="前景色"><input ref={inputRef} type="color" aria-label="绘图颜色" defaultValue={colorRef.current} onInput={event => pick(event.currentTarget.value)} onBlur={event => remember(event.currentTarget.value)} /></label>
-      <button className="color-role foreground-color" type="button" aria-label="使用前景色" title="前景色" style={{ backgroundColor: color }} onClick={() => updateOpacity(opacity)}><span>前</span></button>
-      <button className="color-role background-color" type="button" aria-label="使用背景色" title={`背景色 ${background}`} style={{ backgroundColor: background }} onClick={chooseBackground}><span>后</span></button>
-      <label className="background-picker" title="设置背景色"><input type="color" aria-label="背景色" value={background} onChange={event => setBackground(event.currentTarget.value.toUpperCase())} /></label>
-      <button className="icon-button palette-action" type="button" aria-label="交换前景色和背景色" title="交换前景色和背景色" onClick={swapColors}><ArrowLeft size={13} /><ArrowRight size={13} /></button>
+      <div className="palette-color-tools">
+        <div className="color-stack" aria-label="前景色和背景色">
+          <label className="color-swatch foreground-swatch" title={`前景色 ${color}`} style={{ backgroundColor: color }}>
+            <input ref={inputRef} type="color" aria-label="绘图颜色" defaultValue={colorRef.current} onInput={event => pick(event.currentTarget.value)} onBlur={event => remember(event.currentTarget.value)} />
+            <span>前景</span>
+          </label>
+          <button className="color-swatch background-swatch" type="button" aria-label="使用背景色" title={`背景色 ${background}`} style={{ backgroundColor: background }} onClick={chooseBackground}><span>背景</span></button>
+          <label className="background-picker" title="设置背景色">
+            <input type="color" aria-label="背景色" value={background} onChange={event => setBackground(event.currentTarget.value.toUpperCase())} />
+          </label>
+        </div>
+        <button className="icon-button palette-action" type="button" aria-label="交换前景色和背景色" title="交换前景色和背景色" onClick={swapColors}><ArrowLeft size={13} /><ArrowRight size={13} /></button>
       <button className="transparent-color" type="button" aria-label="使用透明色" title="透明色" onClick={() => updateOpacity(0)}><span><Square size={14} /><X size={10} /></span></button>
-      <button className={`icon-button palette-action ${advancedOpen ? 'active' : ''}`} type="button" aria-label="高级颜色选择器" title="HSB / RGB 颜色选择器" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen(value => !value)}><span className="advanced-color-mark">HSB</span></button>
+        <button className={`icon-button palette-action color-adjust-button ${advancedOpen ? 'active' : ''}`} type="button" aria-label="调整颜色" title="调整颜色（HSB / RGB）" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen(value => !value)}><SlidersHorizontal size={14} /><span>调整颜色</span></button>
+        <label className="compact-opacity"><span>不透明度</span><input aria-label="颜色不透明度" type="range" min="0" max="100" step="1" value={opacity} onChange={event => updateOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
+      </div>
       <span className="palette-divider" />
       <div className="palette-swatches" role="group" aria-label="绘图色板">
         {swatches.length === 0 && <span className="palette-hint">色板为空，点击 + 添加颜色</span>}
@@ -165,18 +174,17 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
       <button ref={managerToggleRef} className={`icon-button palette-action ${managing ? 'active' : ''}`} type="button" aria-label="管理色板" title="管理色板" aria-expanded={managing} aria-controls="palette-manager" onClick={() => setManaging(value => !value)}><SlidersHorizontal size={15} /></button>
       <span className="color-hex">{color}</span>
     </div>
-    <div className="palette-opacity">
-      <label><span>颜色不透明度</span><input aria-label="颜色不透明度" type="range" min="0" max="100" step="1" value={opacity} onChange={event => updateOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
-      <span className="palette-hint">前景色</span>
-    </div>
-    {advancedOpen && <div className="advanced-color-panel" role="group" aria-label="高级颜色选择器">
+    {advancedOpen && <div className="advanced-color-panel" role="group" aria-label="调整颜色">
+      <div className="advanced-color-heading"><strong>调整颜色</strong><span>HSB / RGB</span></div>
       <div className="advanced-color-preview" style={{ backgroundColor: color }}><span>{color}</span></div>
-      <div className="advanced-color-fields">
+      <div className="advanced-color-fields" aria-label="HSB 色彩模式">
+        <span className="advanced-color-section-label">HSB：色相、饱和度、明度</span>
         <label><span>色相</span><input aria-label="色相" type="range" min="0" max="360" value={hsb.hue} onChange={event => updateHsb('hue', Number(event.target.value))} /><output>{hsb.hue}°</output></label>
         <label><span>饱和度</span><input aria-label="饱和度" type="range" min="0" max="100" value={hsb.saturation} onChange={event => updateHsb('saturation', Number(event.target.value))} /><output>{hsb.saturation}%</output></label>
         <label><span>明度</span><input aria-label="明度" type="range" min="0" max="100" value={hsb.brightness} onChange={event => updateHsb('brightness', Number(event.target.value))} /><output>{hsb.brightness}%</output></label>
       </div>
       <div className="rgb-fields" aria-label="RGB 数值">
+        <span className="advanced-color-section-label">RGB：红、绿、蓝通道</span>
         <label><span>R</span><input aria-label="红色通道" type="number" min="0" max="255" value={red} onChange={event => updateRgb('red', Number(event.target.value))} /></label>
         <label><span>G</span><input aria-label="绿色通道" type="number" min="0" max="255" value={green} onChange={event => updateRgb('green', Number(event.target.value))} /></label>
         <label><span>B</span><input aria-label="蓝色通道" type="number" min="0" max="255" value={blue} onChange={event => updateRgb('blue', Number(event.target.value))} /></label>
