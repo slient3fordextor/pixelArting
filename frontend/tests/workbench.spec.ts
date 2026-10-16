@@ -61,6 +61,26 @@ test('mobile layout keeps canvas and import controls available', async ({ page }
   await expect(page.getByRole('dialog')).toBeVisible();
 });
 
+test('canvas display settings change only the preview', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  const canvas = page.getByLabel('像素编辑画布');
+  await expect(canvas).toBeVisible();
+  const before = await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL());
+  await page.getByRole('button', { name: '画布显示设置', exact: true }).click();
+  const settings = page.getByRole('group', { name: '画布显示设置' });
+  await expect(settings).toBeVisible();
+  await page.getByLabel('透明背景样式').selectOption('solid');
+  await page.getByLabel('画布背景颜色').fill('#123456');
+  await expect(page.locator('.pixel-board')).toHaveCSS('background-color', 'rgb(18, 52, 86)');
+  await page.getByLabel('网格颜色').fill('#ff0000');
+  await page.getByLabel('网格间隔').fill('4');
+  await page.getByRole('button', { name: '像素网格', exact: true }).click();
+  await expect(page.locator('.pixel-grid')).toHaveCSS('background-size', '24px 24px, 24px 24px');
+  expect(await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL())).toBe(before);
+  await page.evaluate(() => localStorage.removeItem('pixelart-canvas-display-v1'));
+});
+
 test('continuous color selection uses the latest color without editing the document', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/');

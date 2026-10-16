@@ -69,7 +69,17 @@ small { font-size: 11px; color: #8a909a; font-weight: 400; }
 .breadcrumb { color: #9da3ac; display: flex; gap: 7px; align-items: center; font-size: 11px; flex-shrink: 0; }
 .draft-badge { color: #aa7c31; font-size: 10px; flex-shrink: 0; }
 .version-label { font-size: 11px; color: #9ba0a8; }
+.canvas-toolbar-wrap { position: relative; z-index: 4; flex-shrink: 0; }
 .canvas-toolbar { position: relative; flex-shrink: 0; display: flex; flex-wrap: nowrap; align-items: center; padding: 5px 10px; gap: 12px; border-top: 1px solid #e1e5e8; background: #fafbfc; overflow-x: auto; }
+.canvas-display-popover { position: absolute; right: 12px; top: calc(100% + 6px); z-index: 12; display: grid; gap: 8px; width: 230px; padding: 11px 12px; border: 1px solid #dfe5e8; border-radius: 7px; background: #fff; box-shadow: 0 8px 24px #24343e1c; }
+.canvas-display-heading { display: flex; align-items: center; justify-content: space-between; color: #30353d; font-size: 11px; }
+.canvas-display-heading button { width: 20px; height: 20px; color: #8a949e; font-size: 17px; line-height: 1; }
+.canvas-display-popover label { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto; align-items: center; gap: 6px; color: #68727f; font-size: 10px; }
+.canvas-display-popover label select { min-height: 25px; padding: 3px 5px; font-size: 10px; }
+.canvas-display-popover label input[type='color'] { width: 30px; height: 22px; padding: 0; border: 1px solid #cbd4d9; border-radius: 3px; }
+.canvas-display-popover label input[type='range'] { min-width: 0; width: 100%; }
+.canvas-display-popover output { min-width: 31px; color: #8a949e; font: 9px monospace; text-align: right; }
+.canvas-display-divider { height: 1px; background: #e8ecee; }
 .canvas-view-tools { flex-wrap: nowrap; justify-content: flex-end; margin-left: auto; flex-shrink: 0; }
 .canvas-toolbar .selection-tools { flex-shrink: 0; }
 .canvas-toolbar .icon-button { width: 26px; height: 28px; }

@@ -50,6 +50,12 @@ type Props = {
   eyedropperSample?: ColorSampleSource;
   zoom: number;
   grid: boolean;
+  gridColor?: string;
+  gridOpacity?: number;
+  gridSize?: number;
+  backgroundStyle?: 'checker' | 'solid';
+  backgroundColor?: string;
+  checkerSize?: number;
   guides?: boolean;
   onionFrames?: Frame[];
   readonly?: boolean;
@@ -134,6 +140,12 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     eyedropperSample = 'merged',
     zoom,
     grid,
+    gridColor = '#6E7473',
+    gridOpacity = 20,
+    gridSize = 1,
+    backgroundStyle = 'checker',
+    backgroundColor = '#FFFFFF',
+    checkerSize = 16,
     guides = true,
     onionFrames,
     readonly,
@@ -689,6 +701,12 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
   }, [frame, activeLayer, tool, readonly, shapeStrokeSize, shapeMode]);
   const selected = layers.find((layer) => layer.id === activeLayer);
   const region = finding?.frameId === frame.id ? finding.region : null;
+  const gridLineColor = (() => {
+    const value = gridColor.replace('#', '').trim();
+    const number = Number.parseInt(value.length === 3 ? value.split('').map(part => part + part).join('') : value, 16);
+    const alpha = Math.max(0.05, Math.min(1, gridOpacity / 100));
+    return `rgba(${(number >> 16) & 255}, ${(number >> 8) & 255}, ${number & 255}, ${alpha})`;
+  })();
   const cursorClass =
     panning || spacePressed || tool === 'pan'
       ? `pan-cursor${panning ? ' is-panning' : ''}`
@@ -711,6 +729,9 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
           width: frame.width * zoom,
           height: frame.height * zoom,
           transform: `translate(${pan[0] * zoom}px, ${pan[1] * zoom}px)`,
+          backgroundColor: backgroundStyle === 'solid' ? backgroundColor : '#FFFFFF',
+          backgroundImage: backgroundStyle === 'checker' ? `conic-gradient(#E5E8EB 25%, transparent 0 50%, #E5E8EB 0 75%, transparent 0)` : 'none',
+          backgroundSize: backgroundStyle === 'checker' ? `${checkerSize}px ${checkerSize}px` : 'auto',
         }}
       >
         <canvas ref={onionRef} width={frame.width} height={frame.height} className="onion-overlay" aria-label="洋葱皮预览画布" />
@@ -819,7 +840,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
           onAuxClick={event => { if (event.button === 1) event.preventDefault(); }}
         />
         {grid && zoom >= 5 ? (
-          <div className="pixel-grid" style={{ backgroundSize: `${zoom}px ${zoom}px` }} />
+          <div className="pixel-grid" style={{ backgroundSize: `${zoom * gridSize}px ${zoom * gridSize}px`, backgroundImage: `linear-gradient(to right, ${gridLineColor} 1px, transparent 1px), linear-gradient(to bottom, ${gridLineColor} 1px, transparent 1px)` }} />
         ) : null}
         {selection ? (
           <div

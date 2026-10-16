@@ -42,11 +42,36 @@ function IconButton({ icon: Icon, label, onClick, disabled = false, active = fal
 const directionNames: Record<Direction, string> = { down: '下', left: '左', right: '右', up: '上' };
 type PlaybackMode = 'forward' | 'reverse' | 'pingpong';
 type PlaybackFrame = { frameId: string; durationMs: number };
+type CanvasDisplaySettings = {
+  backgroundStyle: 'checker' | 'solid';
+  backgroundColor: string;
+  checkerSize: number;
+  gridColor: string;
+  gridOpacity: number;
+  gridSize: number;
+};
 
 function arrangePlayback(sequence: PlaybackFrame[], mode: PlaybackMode) {
   if (mode === 'reverse') return [...sequence].reverse();
   if (mode === 'pingpong' && sequence.length > 1) return [...sequence, ...sequence.slice(0, -1).reverse()];
   return sequence;
+}
+
+const CANVAS_DISPLAY_STORAGE_KEY = 'pixelart-canvas-display-v1';
+const defaultCanvasDisplay: CanvasDisplaySettings = { backgroundStyle: 'checker', backgroundColor: '#FFFFFF', checkerSize: 16, gridColor: '#6E7473', gridOpacity: 20, gridSize: 1 };
+
+function readCanvasDisplaySettings(): CanvasDisplaySettings {
+  try {
+    const value = JSON.parse(localStorage.getItem(CANVAS_DISPLAY_STORAGE_KEY) || '{}');
+    return {
+      backgroundStyle: value.backgroundStyle === 'solid' ? 'solid' : 'checker',
+      backgroundColor: typeof value.backgroundColor === 'string' && /^#[\da-f]{6}$/i.test(value.backgroundColor) ? value.backgroundColor.toUpperCase() : defaultCanvasDisplay.backgroundColor,
+      checkerSize: Number.isFinite(value.checkerSize) ? Math.max(4, Math.min(32, Math.round(value.checkerSize))) : defaultCanvasDisplay.checkerSize,
+      gridColor: typeof value.gridColor === 'string' && /^#[\da-f]{6}$/i.test(value.gridColor) ? value.gridColor.toUpperCase() : defaultCanvasDisplay.gridColor,
+      gridOpacity: Number.isFinite(value.gridOpacity) ? Math.max(5, Math.min(100, Math.round(value.gridOpacity))) : defaultCanvasDisplay.gridOpacity,
+      gridSize: Number.isFinite(value.gridSize) ? Math.max(1, Math.min(8, Math.round(value.gridSize))) : defaultCanvasDisplay.gridSize,
+    };
+  } catch { return defaultCanvasDisplay; }
 }
 
 const statusNames: Record<string, string> = { passed: '通过', findings: '问题', skipped: '跳过', disabled: '关闭', failed: '失败' };
@@ -155,6 +180,8 @@ export default function App() {
   const [colorOpacity, setColorOpacity] = useState(colorOpacityRef.current);
   const [zoom, setZoom] = useState(window.innerWidth < 600 ? 3 : window.innerHeight < 850 ? 4 : 6);
   const [grid, setGrid] = useState(false);
+  const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
+  const [canvasDisplay, setCanvasDisplay] = useState<CanvasDisplaySettings>(readCanvasDisplaySettings);
   const [guides, setGuides] = useState(true);
   const [onion, setOnion] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -216,6 +243,10 @@ export default function App() {
   latestAsset.current = asset;
   latestFrameIndex.current = frameIndex;
   latestSelectedLayer.current = selectedLayer;
+
+  useEffect(() => {
+    try { localStorage.setItem(CANVAS_DISPLAY_STORAGE_KEY, JSON.stringify(canvasDisplay)); } catch { /* Storage may be unavailable. */ }
+  }, [canvasDisplay]);
 
   function selectTool(next: DrawingTool) {
     setToolSettingsOpen(current => tool === next ? !current : true);
@@ -1244,12 +1275,24 @@ export default function App() {
           </div>
         </WorkspacePanel>
         <div ref={stageRef} className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
-          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={(color, opacity) => { colorRef.current = color; setPickedColor({ color, opacity }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
-          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
+          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={(color, opacity) => { colorRef.current = color; setPickedColor({ color, opacity }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
+          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
         </div>
-        <div className="canvas-toolbar" aria-label="画布操作">
-          <div className="tool-group selection-tools" role="group" aria-label="编辑操作"><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /></div>
-          <div className="tool-group canvas-view-tools"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= MIN_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, -1))} /><CanvasZoomControl zoom={zoom} disabled={drawingStroke} onChange={value => { setZoom(value); locateCanvas(); }} /><IconButton icon={ZoomIn} label="放大" disabled={zoom >= MAX_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, 1))} /><button className="button secondary canvas-locate" type="button" aria-label="适应窗口 (Shift+F)" title="适应窗口 (Shift+F)" disabled={drawingStroke} onClick={() => fitCanvas()}><Maximize size={15} />适应窗口</button><button className="button secondary canvas-locate" type="button" aria-label="填充窗口" title="按受限边精确贴合可绘图区域，完整显示画布" disabled={drawingStroke} onClick={() => fitCanvas('fill')}><ScanLine size={15} />填充窗口</button><button className="button secondary canvas-locate" type="button" aria-label="定位画布 (F)" title="定位画布 (F)" disabled={drawingStroke} onClick={locateCanvas}><Focus size={15} />定位画布</button></div>
+        <div className="canvas-toolbar-wrap">
+          <div className="canvas-toolbar" aria-label="画布操作">
+            <div className="tool-group selection-tools" role="group" aria-label="编辑操作"><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /></div>
+            <div className="tool-group canvas-view-tools"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><IconButton icon={Settings2} label="画布显示设置" active={displaySettingsOpen} onClick={() => setDisplaySettingsOpen(value => !value)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= MIN_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, -1))} /><CanvasZoomControl zoom={zoom} disabled={drawingStroke} onChange={value => { setZoom(value); locateCanvas(); }} /><IconButton icon={ZoomIn} label="放大" disabled={zoom >= MAX_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, 1))} /><button className="button secondary canvas-locate" type="button" aria-label="适应窗口 (Shift+F)" title="适应窗口 (Shift+F)" disabled={drawingStroke} onClick={() => fitCanvas()}><Maximize size={15} />适应窗口</button><button className="button secondary canvas-locate" type="button" aria-label="填充窗口" title="按受限边精确贴合可绘图区域，完整显示画布" disabled={drawingStroke} onClick={() => fitCanvas('fill')}><ScanLine size={15} />填充窗口</button><button className="button secondary canvas-locate" type="button" aria-label="定位画布 (F)" title="定位画布 (F)" disabled={drawingStroke} onClick={locateCanvas}><Focus size={15} />定位画布</button></div>
+          </div>
+          {displaySettingsOpen ? <div className="canvas-display-popover" role="group" aria-label="画布显示设置">
+            <div className="canvas-display-heading"><strong>画布显示</strong><button type="button" aria-label="关闭画布显示设置" onClick={() => setDisplaySettingsOpen(false)}>×</button></div>
+            <label>透明背景<select aria-label="透明背景样式" value={canvasDisplay.backgroundStyle} onChange={event => setCanvasDisplay(value => ({ ...value, backgroundStyle: event.target.value as CanvasDisplaySettings['backgroundStyle'] }))}><option value="checker">棋盘格</option><option value="solid">纯色</option></select></label>
+            <label>背景颜色<input aria-label="画布背景颜色" type="color" value={canvasDisplay.backgroundColor} disabled={canvasDisplay.backgroundStyle !== 'solid'} onChange={event => setCanvasDisplay(value => ({ ...value, backgroundColor: event.target.value.toUpperCase() }))} /></label>
+            <label>棋盘格大小<input aria-label="棋盘格大小" type="range" min="4" max="32" step="1" value={canvasDisplay.checkerSize} disabled={canvasDisplay.backgroundStyle !== 'checker'} onChange={event => setCanvasDisplay(value => ({ ...value, checkerSize: Number(event.target.value) }))} /><output>{canvasDisplay.checkerSize}px</output></label>
+            <div className="canvas-display-divider" />
+            <label>网格颜色<input aria-label="网格颜色" type="color" value={canvasDisplay.gridColor} onChange={event => setCanvasDisplay(value => ({ ...value, gridColor: event.target.value.toUpperCase() }))} /></label>
+            <label>网格透明度<input aria-label="网格透明度" type="range" min="5" max="100" step="1" value={canvasDisplay.gridOpacity} onChange={event => setCanvasDisplay(value => ({ ...value, gridOpacity: Number(event.target.value) }))} /><output>{canvasDisplay.gridOpacity}%</output></label>
+            <label>网格间隔<input aria-label="网格间隔" type="range" min="1" max="8" step="1" value={canvasDisplay.gridSize} onChange={event => setCanvasDisplay(value => ({ ...value, gridSize: Number(event.target.value) }))} /><output>{canvasDisplay.gridSize}px</output></label>
+          </div> : null}
         </div>
         {preview ? <><div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><label>帧<select aria-label="修复预览帧" value={frameIndex} disabled={busy} onChange={event => setFrameIndex(Number(event.target.value))}>{draft.frames.map((item, index) => <option key={item.id} value={index}>{index + 1}</option>)}</select></label><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div>{previewChange ? <RepairSummary change={previewChange} /> : null}</> : null}
         <WorkspacePanel {...panelProps('palette')} className="palette-panel"><DrawingPalette key={projectId} projectId={projectId} colorRef={colorRef} colorOpacityRef={colorOpacityRef} palette={config.palette} pickedColor={pickedColor} onOpacityChange={setColorOpacity} /></WorkspacePanel>
