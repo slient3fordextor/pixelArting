@@ -1,4 +1,5 @@
 export type Layer = { id: string; name: string; visible: boolean; locked: boolean; opacity: number };
+export type ColorSampleSource = 'layer' | 'merged';
 export type Frame = {
   id: string; width: number; height: number; pixels: Record<string, string>;
   origin: { x: number; y: number } | null; baselineY: number | null;

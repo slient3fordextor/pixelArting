@@ -144,6 +144,69 @@ test('first-phase pixel tools draw shapes, fill pixels and expose selection cont
   await expect(page.getByRole('button', { name: '移动画布 (H)', exact: true })).toBeVisible();
 });
 
+test('pencil and eraser use the selected square brush size', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  const canvas = page.getByLabel('像素编辑画布');
+  await expect(canvas).toBeVisible();
+  const rect = await canvas.boundingBox();
+  expect(rect).not.toBeNull();
+  const point = (x: number, y: number) => ({ x: rect!.x + rect!.width * (x + 0.5) / 64, y: rect!.y + rect!.height * (y + 0.5) / 64 });
+  const pixelAlpha = (x: number, y: number) => canvas.evaluate((element: HTMLCanvasElement, position) => element.getContext('2d')!.getImageData(position.x, position.y, 1, 1).data[3], { x, y });
+
+  await page.getByRole('button', { name: '铅笔 (B)', exact: true }).click();
+  await expect(page.getByLabel('画笔工具设置')).toBeVisible();
+  const size = page.getByLabel('画笔粗细');
+  await size.press('Home');
+  await size.press('ArrowRight');
+  await size.press('ArrowRight');
+  await expect(size).toHaveValue('3');
+  await page.mouse.move(point(50, 50).x, point(50, 50).y);
+  await expect(page.getByLabel('画笔范围预览')).toBeVisible();
+  await expect(canvas).toHaveCSS('cursor', 'none');
+  await page.mouse.click(point(50, 50).x, point(50, 50).y);
+  for (const y of [49, 50, 51]) for (const x of [49, 50, 51]) {
+    await expect.poll(() => pixelAlpha(x, y)).toBe(255);
+  }
+
+  await page.getByRole('button', { name: '橡皮 (E)', exact: true }).click();
+  await page.mouse.click(point(50, 50).x, point(50, 50).y);
+  for (const y of [49, 50, 51]) for (const x of [49, 50, 51]) {
+    await expect.poll(() => pixelAlpha(x, y)).toBe(0);
+  }
+});
+
+test('pencil opacity creates translucent pixels while eraser stays complete', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  await expect(page.getByLabel('像素编辑画布')).toHaveAttribute('aria-busy', 'false');
+  await page.getByRole('button', { name: '新建素材', exact: true }).click();
+  await page.getByLabel('素材名称').fill('透明画笔测试');
+  await page.getByRole('button', { name: '创建素材', exact: true }).click();
+  const canvas = page.getByLabel('像素编辑画布');
+  await expect(page.locator('.document-bar')).toContainText('透明画笔测试');
+  await expect(canvas).toHaveAttribute('aria-busy', 'false');
+  const rect = await canvas.boundingBox();
+  expect(rect).not.toBeNull();
+  const point = (x: number, y: number) => ({ x: rect!.x + rect!.width * (x + 0.5) / 64, y: rect!.y + rect!.height * (y + 0.5) / 64 });
+  const pixel = (x: number, y: number) => canvas.evaluate((element: HTMLCanvasElement, position) => Array.from(element.getContext('2d')!.getImageData(position.x, position.y, 1, 1).data), { x, y });
+  await page.getByRole('button', { name: '铅笔 (B)', exact: true }).click();
+  const opacity = page.getByLabel('画笔不透明度');
+  await opacity.press('Home');
+  for (let index = 1; index < 50; index++) await opacity.press('ArrowRight');
+  await expect(opacity).toHaveValue('50');
+  await page.mouse.click(point(40, 40).x, point(40, 40).y);
+  await expect.poll(() => pixel(40, 40)).toEqual([
+    expect.any(Number), expect.any(Number), expect.any(Number), 128,
+  ]);
+  // Unpremultiplying translucent canvas pixels can round RGB by one unit.
+  const rgba = await pixel(40, 40);
+  for (const [index, channel] of [33, 143, 131].entries()) expect(Math.abs(rgba[index] - channel)).toBeLessThanOrEqual(1);
+  await page.getByRole('button', { name: '橡皮 (E)', exact: true }).click();
+  await page.mouse.click(point(40, 40).x, point(40, 40).y);
+  await expect.poll(() => pixel(40, 40)).toEqual([0, 0, 0, 0]);
+});
+
 test('keyboard shortcuts switch tools and undo canvas edits', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/');
@@ -157,6 +220,11 @@ test('keyboard shortcuts switch tools and undo canvas edits', async ({ page }) =
   await expect(page.getByRole('button', { name: '橡皮 (E)', exact: true })).toHaveClass(/active/);
   await page.keyboard.press('b');
   await expect(page.getByRole('button', { name: '铅笔 (B)', exact: true })).toHaveClass(/active/);
+  await expect(page.getByLabel('画笔粗细')).toHaveValue('1');
+  await page.keyboard.press(']');
+  await expect(page.getByLabel('画笔粗细')).toHaveValue('2');
+  await page.keyboard.press('[');
+  await expect(page.getByLabel('画笔粗细')).toHaveValue('1');
 
   const before = await canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data));
   await page.mouse.click(point(2, 2).x, point(2, 2).y);
@@ -253,10 +321,11 @@ test('all assets show actual previews and deletion requires confirmation', async
   await page.getByRole('button', { name: '删除素材 自定义素材', exact: true }).click();
   await expect(page.locator('.asset-row')).toHaveCount(count);
   await expect(page.locator('.document-bar')).toContainText('自定义素材');
+  const nextAssetName = await page.locator('.asset-row').filter({ hasNot: page.getByRole('button', { name: '删除素材 自定义素材', exact: true }) }).first().locator('.asset-name').innerText();
   page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', { name: '删除素材 自定义素材', exact: true }).click();
   await expect(page.locator('.asset-row')).toHaveCount(count - 1);
-  await expect(page.locator('.document-bar')).toContainText('森林旅者');
+  await expect(page.locator('.document-bar')).toContainText(nextAssetName);
   await page.reload();
   await expect(page.locator('.asset-row')).toHaveCount(count - 1);
   await expect(page.getByRole('button', { name: '删除素材 自定义素材', exact: true })).toHaveCount(0);

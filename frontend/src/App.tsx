@@ -3,14 +3,24 @@ import { flushSync } from 'react-dom';
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronRight, ClipboardPaste, Copy, CopyPlus, Download, Eraser, Eye, EyeOff,
   FilePlus2, Folder, Grid2X2, Hand, History, ImagePlus, Layers, Lock, Minus, Move, PaintBucket, Pause, Pencil, Pipette, Play, Plus, Redo2,
-  Circle, Crosshair, Scissors, Square, SquareDashedMousePointer,
+  Circle, Crosshair, Focus, Maximize, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Scissors, Square, SquareDashedMousePointer,
   RefreshCw, Save, ScanLine, Settings2, Trash2, Undo2, Unlock, Upload, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
-import type { MouseEvent } from 'react';
+import type { CSSProperties, MouseEvent } from 'react';
 import { api, blankImage, loadImage } from './api';
 import { CanvasEditor } from './CanvasEditor';
-import type { CanvasEditorHandle, DrawingTool, Rect } from './CanvasEditor';
+import { CanvasZoomControl } from './CanvasZoomControl';
+import { FillToolSettings } from './FillToolSettings';
+import { EyedropperToolSettings } from './EyedropperToolSettings';
+import { WorkspacePanel } from './WorkspacePanel';
+import { WorkspaceWindowMenu } from './WorkspaceWindowMenu';
+import { useWorkspaceLayout } from './workspaceLayout';
+import { normalizeFillSettings } from './drawingFill';
+import type { BrushShape, CanvasEditorHandle, DrawingTool, Rect } from './CanvasEditor';
+import { MIN_ZOOM, MAX_ZOOM, stepZoom } from './canvasView';
+import { isShapeTool } from './drawingShapes';
+import type { ShapeMode } from './drawingShapes';
 import { DrawingPalette } from './DrawingPalette';
 import { FrameMetadataEditor } from './FrameMetadataEditor';
 import { SpriteSheetImport } from './SpriteSheetImport';
@@ -23,16 +33,65 @@ import { AIControls } from './AIControls';
 import { ContextMenu } from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { defaultConfig, RULE_NAMES } from './types';
-import type { Asset, AssetItem, CheckConfig, Direction, Document, Finding, Frame, Layer, Preview, Project, Report } from './types';
+import type { Asset, AssetItem, CheckConfig, ColorSampleSource, Direction, Document, Finding, Frame, Layer, Preview, Project, Report } from './types';
 
-function IconButton({ icon: Icon, label, onClick, disabled = false, active = false }: { icon: LucideIcon; label: string; onClick: () => void; disabled?: boolean; active?: boolean }) {
-  return <button className={`icon-button ${active ? 'active' : ''}`} type="button" title={label} aria-label={label} onClick={onClick} disabled={disabled}><Icon size={17} /></button>;
+function IconButton({ icon: Icon, label, onClick, disabled = false, active = false, ariaExpanded }: { icon: LucideIcon; label: string; onClick: () => void; disabled?: boolean; active?: boolean; ariaExpanded?: boolean }) {
+  return <button className={`icon-button ${active ? 'active' : ''}`} type="button" title={label} aria-label={label} aria-expanded={ariaExpanded} onClick={onClick} disabled={disabled}><Icon size={17} /></button>;
 }
 
 const directionNames: Record<Direction, string> = { down: '下', left: '左', right: '右', up: '上' };
 const statusNames: Record<string, string> = { passed: '通过', findings: '问题', skipped: '跳过', disabled: '关闭', failed: '失败' };
 const DRAFT_STORAGE_PREFIX = 'pixelart-draft-v1:';
 const CONFIG_DRAFT_STORAGE_PREFIX = 'pixelart-config-draft-v1:';
+const BRUSH_SIZE_STORAGE_KEY = 'pixelart-brush-size-v1';
+const BRUSH_OPACITY_STORAGE_KEY = 'pixelart-brush-opacity-v1';
+const BRUSH_SHAPE_STORAGE_KEY = 'pixelart-brush-shape-v1';
+const SHAPE_SETTINGS_STORAGE_KEY = 'pixelart-shape-settings-v1';
+const FILL_SETTINGS_STORAGE_KEY = 'pixelart-fill-settings-v1';
+const EYEDROPPER_SAMPLE_STORAGE_KEY = 'pixelart-eyedropper-sample-v1';
+
+function readEyedropperSample(): ColorSampleSource {
+  try { return localStorage.getItem(EYEDROPPER_SAMPLE_STORAGE_KEY) === 'layer' ? 'layer' : 'merged'; }
+  catch { return 'merged'; }
+}
+
+function readFillSettings() {
+  try { return normalizeFillSettings(JSON.parse(localStorage.getItem(FILL_SETTINGS_STORAGE_KEY) || '{}')); }
+  catch { return normalizeFillSettings(null); }
+}
+
+function readShapeSettings(): { strokeSize: number; mode: ShapeMode } {
+  try {
+    const value = JSON.parse(localStorage.getItem(SHAPE_SETTINGS_STORAGE_KEY) || '{}');
+    return { strokeSize: Number.isFinite(value.strokeSize) ? Math.max(1, Math.min(16, Math.round(value.strokeSize))) : 1, mode: value.mode === 'fill' ? 'fill' : 'stroke' };
+  } catch { return { strokeSize: 1, mode: 'stroke' }; }
+}
+
+function readBrushSize() {
+  try {
+    const value = Number.parseInt(localStorage.getItem(BRUSH_SIZE_STORAGE_KEY) || '1', 10);
+    return Number.isFinite(value) ? Math.max(1, Math.min(16, value)) : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function readBrushOpacity() {
+  try {
+    const value = Number.parseInt(localStorage.getItem(BRUSH_OPACITY_STORAGE_KEY) || '100', 10);
+    return Number.isFinite(value) ? Math.max(1, Math.min(100, value)) : 100;
+  } catch {
+    return 100;
+  }
+}
+
+function readBrushShape(): BrushShape {
+  try {
+    return localStorage.getItem(BRUSH_SHAPE_STORAGE_KEY) === 'circle' ? 'circle' : 'square';
+  } catch {
+    return 'square';
+  }
+}
 
 type StoredDraft = {
   assetId: string;
@@ -63,7 +122,17 @@ export default function App() {
   const [selectedLayer, setSelectedLayer] = useState('');
   const [frameIndex, setFrameIndex] = useState(0);
   const [tool, setTool] = useState<DrawingTool>('pencil');
-  const [pickedColor, setPickedColor] = useState('');
+  const [toolSettingsOpen, setToolSettingsOpen] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const { layout, updatePanel, restorePanel, resetLayout, expandToolOptions, activePanel, setActivePanel } = useWorkspaceLayout(setFocusMode);
+  const panelProps = (id: keyof typeof layout) => ({ id, state: layout[id], active: activePanel === id, onActivate: setActivePanel, onChange: updatePanel });
+  const [brushSize, setBrushSize] = useState(readBrushSize);
+  const [brushOpacity, setBrushOpacity] = useState(readBrushOpacity);
+  const [brushShape, setBrushShape] = useState<BrushShape>(readBrushShape);
+  const [shapeSettings, setShapeSettings] = useState(readShapeSettings);
+  const [fillSettings, setFillSettings] = useState(readFillSettings);
+  const [eyedropperSample, setEyedropperSample] = useState(readEyedropperSample);
+  const [pickedColor, setPickedColor] = useState<{ color: string } | null>(null);
   const colorRef = useRef('#218F83');
   const [zoom, setZoom] = useState(window.innerWidth < 600 ? 3 : window.innerHeight < 850 ? 4 : 6);
   const [grid, setGrid] = useState(false);
@@ -82,6 +151,8 @@ export default function App() {
   const [report, setReport] = useState<Report | null>(null);
   const [finding, setFinding] = useState<Finding | null>(null);
   const [tab, setTab] = useState<'layers' | 'quality' | 'versions'>('layers');
+  const libraryCollapsed = layout.library.visibility !== 'visible';
+  const inspectorCollapsed = layout.inspector.visibility !== 'visible';
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ message: string; error: boolean } | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -103,6 +174,8 @@ export default function App() {
   const layerInput = useRef<HTMLInputElement>(null);
   const layerNameInput = useRef<HTMLInputElement>(null);
   const canvasEditorRef = useRef<CanvasEditorHandle>(null);
+  const previewEditorRef = useRef<CanvasEditorHandle>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<Rect | null>(null);
   const [selectionClipboard, setSelectionClipboard] = useState(false);
   const initialization = useRef(false);
@@ -123,6 +196,94 @@ export default function App() {
   latestAsset.current = asset;
   latestFrameIndex.current = frameIndex;
   latestSelectedLayer.current = selectedLayer;
+
+  function selectTool(next: DrawingTool) {
+    setToolSettingsOpen(current => tool === next ? !current : true);
+    setTool(next);
+    // Selecting a tool updates its options without resurrecting a closed panel.
+    expandToolOptions();
+  }
+
+  function fitCanvas(mode: 'fit' | 'fill' = 'fit') {
+    if (drawingStroke || !draft || !stageRef.current) return;
+    const stage = stageRef.current;
+    const view = stage.querySelector<HTMLElement>('.stage-view');
+    const canvas = view?.querySelector<HTMLCanvasElement>('canvas:not(.onion-overlay)');
+    if (!view || !canvas) return;
+    const currentFrame = draft.frames[frameIndex];
+    const style = getComputedStyle(stage);
+    const count = preview ? 2 : 1;
+    const width = (stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - (parseFloat(style.columnGap) || 0) * (count - 1)) / count - (view.offsetWidth - canvas.offsetWidth) - 4;
+    const height = stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom) - (view.offsetHeight - canvas.offsetHeight) - 4;
+    if (width <= 0 || height <= 0) return;
+    const scale = Math.min(MAX_ZOOM, width / currentFrame.width, height / currentFrame.height);
+    const next = Math.max(MIN_ZOOM, mode === 'fill' ? Math.floor(scale * 1000) / 1000 : scale >= 1 ? Math.floor(scale) : Math.floor(scale * 100) / 100);
+    flushSync(() => { setZoom(next); locateCanvas(); });
+    if (mode === 'fill') {
+      const rect = stage.getBoundingClientRect();
+      const gap = parseFloat(style.columnGap) || 0;
+      const slot = (stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - gap * (count - 1)) / count;
+      const label = view.querySelector<HTMLElement>('.stage-label');
+      const topChrome = (label?.offsetHeight || 0) + (parseFloat(getComputedStyle(view).rowGap) || 0);
+      const centerY = rect.top + stage.clientTop + parseFloat(style.paddingTop) + topChrome + height / 2;
+      const views = stage.querySelectorAll<HTMLElement>('.stage-view');
+      [canvasEditorRef.current, previewEditorRef.current].slice(0, count).forEach((editor, index) => {
+        const board = views[index]?.querySelector<HTMLCanvasElement>('canvas:not(.onion-overlay)');
+        if (!editor || !board) return;
+        const bounds = board.getBoundingClientRect();
+        const centerX = rect.left + stage.clientLeft + parseFloat(style.paddingLeft) + index * (slot + gap) + slot / 2;
+        editor.panBy(bounds.left + bounds.width / 2 - centerX, bounds.top + bounds.height / 2 - centerY);
+      });
+    }
+  }
+
+  function locateCanvas() {
+    if (drawingStroke) return;
+    canvasEditorRef.current?.resetView();
+    previewEditorRef.current?.resetView();
+    stageRef.current?.scrollTo(0, 0);
+  }
+
+  useEffect(() => {
+    try { localStorage.setItem(BRUSH_SIZE_STORAGE_KEY, String(brushSize)); } catch { /* Storage may be unavailable. */ }
+  }, [brushSize]);
+  useEffect(() => {
+    try { localStorage.setItem(BRUSH_OPACITY_STORAGE_KEY, String(brushOpacity)); } catch { /* Storage may be unavailable. */ }
+  }, [brushOpacity]);
+  useEffect(() => {
+    try { localStorage.setItem(BRUSH_SHAPE_STORAGE_KEY, brushShape); } catch { /* Storage may be unavailable. */ }
+  }, [brushShape]);
+
+  useEffect(() => {
+    try { localStorage.setItem(SHAPE_SETTINGS_STORAGE_KEY, JSON.stringify(shapeSettings)); } catch { /* Storage may be unavailable. */ }
+  }, [shapeSettings]);
+  useEffect(() => {
+    try { localStorage.setItem(FILL_SETTINGS_STORAGE_KEY, JSON.stringify(fillSettings)); } catch { /* Storage may be unavailable. */ }
+  }, [fillSettings]);
+  useEffect(() => {
+    try { localStorage.setItem(EYEDROPPER_SAMPLE_STORAGE_KEY, eyedropperSample); } catch { /* Storage may be unavailable. */ }
+  }, [eyedropperSample]);
+
+  useEffect(() => {
+    const panCanvas = (event: WheelEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented || !canvasEditorRef.current) return;
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      if (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]')) return;
+      const stage = stageRef.current!;
+      if (!event.shiftKey && (!(event.target instanceof Node) || !stage.contains(event.target))) return;
+      const deltaX = event.shiftKey ? event.deltaX || event.deltaY : event.deltaX;
+      const deltaY = event.shiftKey ? 0 : event.deltaY;
+      if (!deltaX && !deltaY) return;
+      event.preventDefault();
+      const unitX = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientWidth : 1;
+      const unitY = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? stage.clientHeight : 1;
+      const pointer: [number, number] = [event.clientX, event.clientY];
+      canvasEditorRef.current.panBy(deltaX * unitX, deltaY * unitY, pointer);
+      previewEditorRef.current?.panBy(deltaX * unitX, deltaY * unitY, pointer);
+    };
+    window.addEventListener('wheel', panCanvas, { passive: false });
+    return () => window.removeEventListener('wheel', panCanvas);
+  }, []);
 
   useEffect(() => {
     if (initialization.current) return;
@@ -840,7 +1001,9 @@ export default function App() {
       if (name.startsWith('tool:')) {
         if (textEditing) return;
         const next = name.slice(5) as DrawingTool;
-        if (['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'select', 'pan', 'move-layer'].includes(next)) setTool(next);
+        if (['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'select', 'pan', 'move-layer'].includes(next)) {
+          selectTool(next);
+        }
       }
     };
     window.addEventListener('pixelart-command', command);
@@ -883,13 +1046,36 @@ export default function App() {
         event.preventDefault(); canvasEditorRef.current?.deleteSelection(); return;
       }
       if (event.key === 'Escape' && selection) { event.preventDefault(); canvasEditorRef.current?.clearSelection(); return; }
+      if (!modifier && !event.altKey && (event.key === '[' || event.key === ']') && !locked) {
+        event.preventDefault();
+        const delta = event.key === ']' ? 1 : -1;
+        if (isShapeTool(tool)) setShapeSettings(value => ({ ...value, strokeSize: Math.max(1, Math.min(16, value.strokeSize + delta)) }));
+        else setBrushSize(value => Math.max(1, Math.min(16, value + delta)));
+        return;
+      }
       if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key.toLowerCase() === 'f' && draft) {
+        event.preventDefault();
+        if (event.shiftKey) fitCanvas();
+        else locateCanvas();
+        return;
+      }
       const next = shortcuts[event.key.toLowerCase()];
-      if (next && !locked) { event.preventDefault(); setTool(next); }
+      if (next && !locked) { event.preventDefault(); selectTool(next); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [locked, projectId, selection, undo, redo, draft, frameIndex, selectedLayer]);
+  }, [locked, projectId, selection, undo, redo, draft, frameIndex, selectedLayer, drawingStroke, tool, preview]);
+  useEffect(() => {
+    const toggleFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (isTextEditingTarget(event.target) || (event.target instanceof Element && event.target.closest('.workspace-panel, .workspace-window-menu')) || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      event.preventDefault();
+      setFocusMode(value => !value);
+    };
+    window.addEventListener('keydown', toggleFocus);
+    return () => window.removeEventListener('keydown', toggleFocus);
+  }, []);
   let menuItems: MenuItem[] = [];
   if (menu?.kind === 'library') menuItems = [
     { label: '新建素材', icon: FilePlus2, disabled: locked || !projectId, action: () => setDialog('asset') },
@@ -914,21 +1100,21 @@ export default function App() {
     ];
   }
   if (menu?.kind === 'canvas') menuItems = [
-    { label: '铅笔', icon: Pencil, disabled: locked, action: () => setTool('pencil') },
-    { label: '橡皮', icon: Eraser, disabled: locked, action: () => setTool('eraser') },
-    { label: '取色器', icon: Pipette, disabled: locked, action: () => setTool('eyedropper') },
-    { label: '填充', icon: PaintBucket, disabled: locked, action: () => setTool('fill') },
-    { label: '直线', icon: Minus, disabled: locked, action: () => setTool('line') },
-    { label: '矩形', icon: Square, disabled: locked, action: () => setTool('rectangle') },
-    { label: '椭圆', icon: Circle, disabled: locked, action: () => setTool('ellipse') },
-    { label: '矩形选区', icon: SquareDashedMousePointer, disabled: locked, action: () => setTool('select') },
+    { label: '铅笔', icon: Pencil, disabled: locked, action: () => selectTool('pencil') },
+    { label: '橡皮', icon: Eraser, disabled: locked, action: () => selectTool('eraser') },
+    { label: '取色器', icon: Pipette, disabled: locked, action: () => selectTool('eyedropper') },
+    { label: '填充', icon: PaintBucket, disabled: locked, action: () => selectTool('fill') },
+    { label: '直线', icon: Minus, disabled: locked, action: () => selectTool('line') },
+    { label: '矩形', icon: Square, disabled: locked, action: () => selectTool('rectangle') },
+    { label: '椭圆', icon: Circle, disabled: locked, action: () => selectTool('ellipse') },
+    { label: '矩形选区', icon: SquareDashedMousePointer, disabled: locked, action: () => selectTool('select') },
     { label: '复制选区', icon: Copy, disabled: !selection, action: () => canvasEditorRef.current?.copySelection() },
     { label: '剪切选区', icon: Scissors, disabled: locked || !selection, action: () => canvasEditorRef.current?.cutSelection() },
     { label: '粘贴选区', icon: ClipboardPaste, disabled: locked || !selectionClipboard, action: () => canvasEditorRef.current?.pasteSelection() },
     { label: '删除选区', icon: Trash2, danger: true, disabled: locked || !selection, action: () => canvasEditorRef.current?.deleteSelection() },
     { label: '取消选区', icon: X, disabled: !selection, action: () => canvasEditorRef.current?.clearSelection() },
-    { label: '移动画布', icon: Hand, disabled: locked, action: () => setTool('pan') },
-    { label: '移动图层', icon: Move, disabled: locked, action: () => setTool('move-layer') },
+    { label: '移动画布', icon: Hand, disabled: locked, action: () => selectTool('pan') },
+    { label: '移动图层', icon: Move, disabled: locked, action: () => selectTool('move-layer') },
     null, { label: '撤销', icon: Undo2, disabled: locked || !undo.length, action: undoEdit },
     { label: '重做', icon: Redo2, disabled: locked || !redo.length, action: redoEdit },
     null, { label: '新建图层', icon: Plus, disabled: locked || !draft || draft.layers.length >= 16, action: newLayer },
@@ -939,7 +1125,7 @@ export default function App() {
     null, { label: grid ? '隐藏像素网格' : '显示像素网格', icon: Grid2X2, action: () => setGrid(v => !v) },
   ];
   if (menu?.kind === 'layer' && menuLayer && draft) menuItems = [
-    { label: '移动图层', icon: Move, disabled: locked || menuLayer.locked || !menuLayer.visible, action: () => setTool('move-layer') },
+    { label: '移动图层', icon: Move, disabled: locked || menuLayer.locked || !menuLayer.visible, action: () => selectTool('move-layer') },
     { label: '重命名图层', icon: Pencil, disabled: locked || menuLayer.locked, action: () => { layerNameInput.current?.focus(); layerNameInput.current?.select(); } },
     { label: '复制图层', icon: Copy, disabled: locked || draft.layers.length >= 16, action: () => duplicateLayer(menuLayer.id) },
     { label: menuLayer.visible ? '隐藏图层' : '显示图层', icon: menuLayer.visible ? EyeOff : Eye, disabled: locked, action: () => patchLayer(menuLayer.id, { visible: !menuLayer.visible }) },
@@ -959,11 +1145,17 @@ export default function App() {
     { label: '删除帧', icon: Trash2, danger: true, disabled: locked || draft.frames.length <= 1, action: () => deleteFrame(menu.frameIndex!) },
   ];
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${focusMode ? 'focus-mode' : ''}`} style={{
+    '--library-space': layout.library.visibility !== 'visible' || layout.library.mode === 'floating' ? '0px' : layout.library.minimized ? '42px' : 'var(--library-width)',
+    '--inspector-space': layout.inspector.visibility !== 'visible' || layout.inspector.mode === 'floating' ? '0px' : layout.inspector.minimized ? '42px' : 'var(--inspector-width)',
+  } as CSSProperties}>
     <header className="app-header">
       <div className="brand"><Grid2X2 size={23} /><span>PixelArting</span><span className="local-badge">LOCAL</span></div>
       <div className="header-meta"><span>64 × 64</span><span>Godot 4.7.2</span></div>
       <div className="header-actions">
+        <WorkspaceWindowMenu layout={layout} onRestore={id => { setFocusMode(false); restorePanel(id); }} onHide={id => updatePanel(id, { visibility: 'hidden' })} onReset={() => { setFocusMode(false); resetLayout(); }} />
+        <IconButton icon={libraryCollapsed ? PanelLeftOpen : PanelLeftClose} label={libraryCollapsed ? '显示项目栏' : '切换项目栏显示'} onClick={() => libraryCollapsed ? restorePanel('library') : updatePanel('library', { visibility: 'hidden' })} />
+        <IconButton icon={inspectorCollapsed ? PanelRightOpen : PanelRightClose} label={inspectorCollapsed ? '显示检查器' : '切换检查器显示'} onClick={() => inspectorCollapsed ? restorePanel('inspector') : updatePanel('inspector', { visibility: 'hidden' })} />
         <AIControls projectId={projectId} disabled={locked || !!leaveRequest} suspended={!!leaveRequest} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} />
         <button className="button secondary" disabled={!draft || locked} onClick={() => run(saveCurrent, '版本已保存')}><Save size={16} /><span>保存</span>{dirty || configDirty ? <i className="dirty-dot" /> : null}</button>
         <details className="export-menu"><summary className={`button primary ${!asset || dirty || locked ? 'disabled' : ''}`}><Download size={16} />导出</summary>
@@ -982,7 +1174,7 @@ export default function App() {
       </div>
     </header>
 
-    <aside className="library" onContextMenu={event => context(event, { kind: 'library' })}>
+    <WorkspacePanel {...panelProps('library')} className="library" onContextMenu={event => context(event, { kind: 'library' })}>
       <div className="section-label"><span>项目</span><div className="inline-tools"><IconButton icon={Plus} label="新建项目" disabled={locked} onClick={() => setDialog('project')} /><ProjectControls project={currentProject} busy={busy} beforeDelete={confirmDiscardCurrentDraft} onBusyChange={setBusy} onUpdated={async updated => { setProjects(list => list.map(item => item.id === updated.id ? updated : item)); }} onDeleted={async () => {
         const list = await api<Project[]>('/projects'); setProjects(list);
         if (list.length) await switchProject(list[0].id); else { setProjectId(''); setAsset(null); setDraft(null); }
@@ -1000,7 +1192,7 @@ export default function App() {
       </div>)}</div>
       {!assets.length ? <p className="empty-text">暂无素材</p> : null}
       <div className="library-bottom"><span className="connection-dot" />本地工作区<span>v0.1</span></div>
-    </aside>
+    </WorkspacePanel>
 
     <main className="workbench">
       <div className="document-bar"><div><span className="breadcrumb">素材 <ChevronRight size={13} /></span><strong>{draft?.name || '工作台'}</strong>{dirty ? <span className="draft-badge">未保存</span> : null}</div><span className="version-label">{asset ? `v${asset.versions.length}` : ''}</span></div>
@@ -1009,19 +1201,35 @@ export default function App() {
         discardStoredDraft(conflictingDraft.assetId); install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
       }, '旧版草稿已另存为独立素材')}><CopyPlus size={16} />另存副本</button><IconButton icon={X} label="暂不恢复旧版草稿" onClick={() => setConflictingDraft(null)} /></div> : null}
       {draft && frame ? <>
-        <div className="canvas-toolbar">
-          <div className="tool-group drawing-tools"><IconButton icon={Pencil} label="铅笔 (B)" active={tool === 'pencil'} disabled={locked} onClick={() => setTool('pencil')} /><IconButton icon={Eraser} label="橡皮 (E)" active={tool === 'eraser'} disabled={locked} onClick={() => setTool('eraser')} /><IconButton icon={Pipette} label="取色器 (I)" active={tool === 'eyedropper'} disabled={locked} onClick={() => setTool('eyedropper')} /><IconButton icon={PaintBucket} label="填充 (G)" active={tool === 'fill'} disabled={locked} onClick={() => setTool('fill')} /><IconButton icon={Minus} label="直线 (L)" active={tool === 'line'} disabled={locked} onClick={() => setTool('line')} /><IconButton icon={Square} label="矩形 (R)" active={tool === 'rectangle'} disabled={locked} onClick={() => setTool('rectangle')} /><IconButton icon={Circle} label="椭圆 (O)" active={tool === 'ellipse'} disabled={locked} onClick={() => setTool('ellipse')} /><IconButton icon={SquareDashedMousePointer} label="矩形选区 (M)" active={tool === 'select'} disabled={locked} onClick={() => setTool('select')} /><IconButton icon={Hand} label="移动画布 (H)" active={tool === 'pan'} disabled={locked} onClick={() => setTool('pan')} /><IconButton icon={Move} label="移动图层 (V)" active={tool === 'move-layer'} disabled={locked} onClick={() => setTool('move-layer')} /><span className="separator" /><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /></div>
-          <div className="tool-group"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= 1} onClick={() => setZoom(v => v - 1)} /><span className="zoom-label">{zoom * 100}%</span><IconButton icon={ZoomIn} label="放大" disabled={zoom >= 12} onClick={() => setZoom(v => v + 1)} /></div>
+        <WorkspacePanel {...panelProps('tools')} className="tool-options">
+          <div className="tool-group drawing-tools" role="toolbar" aria-label="绘图工具"><IconButton icon={Pencil} label="铅笔 (B)" active={tool === 'pencil'} disabled={locked} onClick={() => { selectTool('pencil'); }} /><IconButton icon={Eraser} label="橡皮 (E)" active={tool === 'eraser'} disabled={locked} onClick={() => { selectTool('eraser'); }} /><IconButton icon={Pipette} label="取色器 (I)" active={tool === 'eyedropper'} disabled={locked} onClick={() => { selectTool('eyedropper'); }} /><IconButton icon={PaintBucket} label="填充 (G)" active={tool === 'fill'} disabled={locked} onClick={() => { selectTool('fill'); }} /><IconButton icon={Minus} label="直线 (L)" active={tool === 'line'} disabled={locked} onClick={() => { selectTool('line'); }} /><IconButton icon={Square} label="矩形 (R)" active={tool === 'rectangle'} disabled={locked} onClick={() => { selectTool('rectangle'); }} /><IconButton icon={Circle} label="椭圆 (O)" active={tool === 'ellipse'} disabled={locked} onClick={() => { selectTool('ellipse'); }} /><IconButton icon={SquareDashedMousePointer} label="矩形选区 (M)" active={tool === 'select'} disabled={locked} onClick={() => { selectTool('select'); }} /><IconButton icon={Hand} label="移动画布 (H)" active={tool === 'pan'} disabled={locked} onClick={() => { selectTool('pan'); }} /><IconButton icon={Move} label="移动图层 (V)" active={tool === 'move-layer'} disabled={locked} onClick={() => { selectTool('move-layer'); }} /></div>
+          <div className={`active-tool-options ${toolSettingsOpen ? 'is-open' : 'is-closed'}`} role="group" aria-label="当前工具选项" hidden={!toolSettingsOpen}>
+            {tool === 'pencil' ? <div className="tool-settings-panel" aria-label="画笔工具设置"><strong>铅笔设置</strong><label className="brush-size-control"><span>粗细</span><input aria-label="画笔粗细" type="range" min="1" max="16" step="1" value={brushSize} disabled={locked} onChange={event => setBrushSize(Number(event.target.value))} /><output>{brushSize} px</output></label><label className="brush-opacity-control"><span>不透明度</span><input aria-label="画笔不透明度" type="range" min="1" max="100" step="1" value={brushOpacity} disabled={locked} onChange={event => setBrushOpacity(Number(event.target.value))} /><output>{brushOpacity}%</output></label><label className="brush-shape-control"><span>形状</span><select aria-label="画笔形状" value={brushShape} disabled={locked} onChange={event => setBrushShape(event.target.value as BrushShape)}><option value="square">方形</option><option value="circle">圆形</option></select></label></div> : null}
+            {tool === 'eraser' ? <div className="tool-settings-panel" aria-label="橡皮工具设置"><strong>橡皮设置</strong><label className="brush-size-control"><span>粗细</span><input aria-label="橡皮粗细" type="range" min="1" max="16" step="1" value={brushSize} disabled={locked} onChange={event => setBrushSize(Number(event.target.value))} /><output>{brushSize} px</output></label><label className="brush-shape-control"><span>形状</span><select aria-label="橡皮形状" value={brushShape} disabled={locked} onChange={event => setBrushShape(event.target.value as BrushShape)}><option value="square">方形</option><option value="circle">圆形</option></select></label><span className="tool-settings-hint">橡皮始终完全擦除像素</span></div> : null}
+            {tool === 'eyedropper' ? <EyedropperToolSettings sample={eyedropperSample} disabled={locked || drawingStroke} onChange={setEyedropperSample} /> : null}
+            {tool === 'fill' ? <FillToolSettings settings={fillSettings} disabled={locked || drawingStroke} onChange={setFillSettings} /> : null}
+            {isShapeTool(tool) ? <div className="tool-settings-panel" aria-label="图形工具设置">
+              <strong>{tool === 'line' ? '直线' : tool === 'rectangle' ? '矩形' : '椭圆'}设置</strong>
+              <label className="brush-size-control"><span>描边粗细</span><input aria-label="图形描边粗细" type="range" min="1" max="16" step="1" value={shapeSettings.strokeSize} disabled={locked || drawingStroke || (tool !== 'line' && shapeSettings.mode === 'fill')} onChange={event => setShapeSettings(value => ({ ...value, strokeSize: Number(event.target.value) }))} /><output>{shapeSettings.strokeSize} px</output></label>
+              {tool !== 'line' ? <label className="brush-shape-control"><span>绘制</span><select aria-label="图形绘制模式" value={shapeSettings.mode} disabled={locked || drawingStroke} onChange={event => setShapeSettings(value => ({ ...value, mode: event.target.value as ShapeMode }))}><option value="stroke">描边</option><option value="fill">填充</option></select></label> : null}
+              <span className="tool-settings-hint">{tool === 'line' ? 'Shift：45° 吸附' : 'Shift：等比例'} · Alt：中心绘制 · Esc：取消</span>
+
+            </div> : null}
+            {!['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse'].includes(tool) ? <p className="tool-options-empty">当前工具没有可调整的参数</p> : null}
+          </div>
+        </WorkspacePanel>
+        <div ref={stageRef} className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
+          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={color => { colorRef.current = color; setPickedColor({ color }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
+          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
         </div>
-        <div className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
-          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={color => { colorRef.current = color; setPickedColor(color); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
-          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} zoom={zoom} grid={grid} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
+        <div className="canvas-toolbar" aria-label="画布操作">
+          <div className="tool-group selection-tools" role="group" aria-label="编辑操作"><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /></div>
+          <div className="tool-group canvas-view-tools"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= MIN_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, -1))} /><CanvasZoomControl zoom={zoom} disabled={drawingStroke} onChange={value => { setZoom(value); locateCanvas(); }} /><IconButton icon={ZoomIn} label="放大" disabled={zoom >= MAX_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, 1))} /><button className="button secondary canvas-locate" type="button" aria-label="适应窗口 (Shift+F)" title="适应窗口 (Shift+F)" disabled={drawingStroke} onClick={() => fitCanvas()}><Maximize size={15} />适应窗口</button><button className="button secondary canvas-locate" type="button" aria-label="填充窗口" title="按受限边精确贴合可绘图区域，完整显示画布" disabled={drawingStroke} onClick={() => fitCanvas('fill')}><ScanLine size={15} />填充窗口</button><button className="button secondary canvas-locate" type="button" aria-label="定位画布 (F)" title="定位画布 (F)" disabled={drawingStroke} onClick={locateCanvas}><Focus size={15} />定位画布</button></div>
         </div>
         {preview ? <><div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><label>帧<select aria-label="修复预览帧" value={frameIndex} disabled={busy} onChange={event => setFrameIndex(Number(event.target.value))}>{draft.frames.map((item, index) => <option key={item.id} value={index}>{index + 1}</option>)}</select></label><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div>{previewChange ? <RepairSummary change={previewChange} /> : null}</> : null}
-        <DrawingPalette colorRef={colorRef} palette={config.palette} pickedColor={pickedColor} />
-        <section className="timeline">
-          <div className="timeline-heading"><div><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><span>帧时间轴</span><small>{draft.frames.length} 帧</small></div><div><IconButton icon={FilePlus2} label="新建空白帧" disabled={locked || draft.frames.length >= 64} onClick={() => createBlankFrame(frameIndex)} /><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></div></div>
-          <div className="frame-list">{draft.frames.map((f, i) => { const mappingIndex = currentAnimation?.frames.findIndex(ref => ref.frameId === f.id) ?? -1; const mapped = mappingIndex >= 0 ? currentAnimation?.frames[mappingIndex] : undefined; return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setAnimationFrameIndex(null); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">#{mappingIndex + 1} · {mapped.durationMs} ms</small> : null}</button>; })}</div>
+        <WorkspacePanel {...panelProps('palette')} className="palette-panel"><DrawingPalette key={projectId} projectId={projectId} colorRef={colorRef} palette={config.palette} pickedColor={pickedColor} /></WorkspacePanel>
+        <WorkspacePanel {...panelProps('timeline')} className="timeline" actions={<><small>{draft.frames.length} 帧</small><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><IconButton icon={FilePlus2} label="新建空白帧" disabled={locked || draft.frames.length >= 64} onClick={() => createBlankFrame(frameIndex)} /><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></>}>
+          <><div className="frame-list">{draft.frames.map((f, i) => { const mappingIndex = currentAnimation?.frames.findIndex(ref => ref.frameId === f.id) ?? -1; const mapped = mappingIndex >= 0 ? currentAnimation?.frames[mappingIndex] : undefined; return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setAnimationFrameIndex(null); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">#{mappingIndex + 1} · {mapped.durationMs} ms</small> : null}</button>; })}</div>
           <div className="animation-controls">
             <select aria-label="动作" value={action} disabled={busy || !!preview} onChange={e => selectAnimation(e.target.value as typeof action, direction)}><option value="idle">idle</option><option value="walk">walk</option></select>
             <select aria-label="方向" value={direction} disabled={busy || !!preview} onChange={e => selectAnimation(action, e.target.value as Direction)}>{Object.entries(directionNames).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select>
@@ -1039,12 +1247,12 @@ export default function App() {
             const sourceIndex = draft.frames.findIndex(item => item.id === ref.frameId);
             const source = draft.frames[sourceIndex];
             return source ? <button key={`${ref.frameId}-${index}`} className={`animation-step ${index === currentRefIndex ? 'selected' : ''}`} aria-label={`动作第 ${index + 1} 帧（素材帧 ${sourceIndex + 1}）`} aria-pressed={index === currentRefIndex} disabled={busy || !!preview} onClick={() => { setFrameIndex(sourceIndex); setAnimationFrameIndex(index); setPlaying(false); }}><Miniature frame={source} layers={draft.layers} /><span>{index + 1} · {ref.durationMs} ms</span></button> : null;
-          })}</div> : null}
-        </section>
+          })}</div> : null}</>
+        </WorkspacePanel>
       </> : <div className="empty-workbench"><ImagePlus size={42} /><h1>素材工作台</h1><div className="inline-tools"><button className="button primary" disabled={!projectId || busy} onClick={() => setDialog('asset')}><FilePlus2 size={16} />新建素材</button><button className="button secondary" disabled={!projectId || busy} onClick={openUpload}><Upload size={16} />上传 PNG</button></div></div>}
     </main>
 
-    <aside className="inspector">
+    <WorkspacePanel {...panelProps('inspector')} className="inspector">
       <div className="panel-tabs">{(['layers', 'quality', 'versions'] as const).map(t => <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>{t === 'layers' ? <Layers size={15} /> : t === 'quality' ? <ScanLine size={15} /> : <History size={15} />}{t === 'layers' ? '图层' : t === 'quality' ? '质检' : '版本'}</button>)}</div>
       {tab === 'layers' && draft && frame ? <div className="panel-content">
         <div className="section-label"><span>图层 <small>{draft.layers.length} / 16</small></span><div className="inline-tools"><IconButton icon={ImagePlus} label="导入 PNG 图层" disabled={locked || draft.layers.length >= 16} onClick={importLayer} /><IconButton icon={Plus} label="新建图层" disabled={locked || draft.layers.length >= 16} onClick={newLayer} /></div></div>
@@ -1068,7 +1276,7 @@ export default function App() {
         <RepairControls asset={asset} config={config} dirty={dirty} busy={busy} locked={locked} onBusyChange={setBusy} onPreview={result => { setPreview(result); setFinding(null); setPlaying(false); }} />
       </div> : null}
       {tab === 'versions' ? <div className="panel-content"><VersionHistory asset={asset} draft={draft} selectedLayer={selectedLayer} frameIndex={frameIndex} zoom={zoom} colorRef={colorRef} busy={busy} locked={locked} onBusyChange={setBusy} onRestore={install} beforeRestore={confirmDiscardCurrentDraft} /></div> : null}
-    </aside>
+    </WorkspacePanel>
 
     <input ref={layerInput} type="file" accept="image/png" hidden onChange={e => { const file = e.target.files?.[0]; if (file && !locked) { if (file.size > 8 * 1024 * 1024 || file.type !== 'image/png') setNotice({ message: '请选择 8 MB 以内的 PNG', error: true }); else run(() => addLayerFile(file)); } e.target.value = ''; }} />
     {menu ? <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} /> : null}

@@ -1,7 +1,9 @@
 const { app, BrowserWindow, dialog, Menu, net, protocol, screen } = require('electron');
 const { existsSync } = require('node:fs');
+const { spawn } = require('node:child_process');
+const { setTimeout: delay } = require('node:timers/promises');
 const path = require('node:path');
-const { startBackend } = require('./backend.cjs');
+const { freePort, startBackend } = require('./backend.cjs');
 const { DESKTOP_SCHEME, DESKTOP_URL, createProtocolHandler } = require('./protocol.cjs');
 
 protocol.registerSchemesAsPrivileged([{ scheme: DESKTOP_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
@@ -9,7 +11,43 @@ protocol.registerSchemesAsPrivileged([{ scheme: DESKTOP_SCHEME, privileges: { st
 app.setName('PixelArting');
 if (process.env.PIXELART_DESKTOP_USER_DATA) app.setPath('userData', process.env.PIXELART_DESKTOP_USER_DATA);
 const root = path.resolve(__dirname, '..');
-let backend, mainWindow, closing = false, checkingClose = false;
+let backend, frontendDev, mainWindow, closing = false, checkingClose = false;
+
+async function startFrontendDev(root, backendUrl, port) {
+  const command = path.join(root, 'frontend', 'node_modules', '.bin', process.platform === 'win32' ? 'vite.cmd' : 'vite');
+  const child = spawn(command, ['--host', '127.0.0.1', '--port', String(port)], {
+    cwd: path.join(root, 'frontend'),
+    windowsHide: true,
+    env: { ...process.env, PIXELART_VITE_BACKEND_URL: backendUrl },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let logs = '';
+  const log = chunk => { logs = (logs + chunk.toString()).slice(-8192); };
+  child.stdout.on('data', log);
+  child.stderr.on('data', log);
+  let spawnError;
+  child.on('error', error => { spawnError = error; });
+  const stop = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill();
+    await delay(100).catch(() => {});
+  };
+  try {
+    for (let attempt = 0; attempt < 150; attempt++) {
+      if (spawnError) throw spawnError;
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`启动前端开发服务器失败\n${logs}`);
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/`);
+        if (response.ok) return { child, port, origin: `http://127.0.0.1:${port}`, stop };
+      } catch { /* Vite may still be starting. */ }
+      await delay(100);
+    }
+    throw new Error(`等待前端开发服务器启动超时\n${logs}`);
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
 
 function command(name) {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -59,7 +97,12 @@ function menu() {
       { label: '移动画布', accelerator: 'H', registerAccelerator: false, click: () => command('tool:pan') },
       { label: '移动图层', accelerator: 'V', registerAccelerator: false, click: () => command('tool:move-layer') },
     ] },
-    { label: '窗口', submenu: [{ role: 'minimize', label: '最小化' }, { role: 'togglefullscreen', label: '全屏' }] },
+    { label: '窗口', submenu: [
+      ...Object.entries({ library: '项目栏', inspector: '检查器', tools: '工具栏', palette: '调色板', timeline: '时间轴' })
+        .map(([id, label]) => ({ label, click: () => command(`panel:${id}`) })),
+      { type: 'separator' }, { label: '恢复默认工作区', click: () => command('workspace:reset') },
+      { type: 'separator' }, { role: 'minimize', label: '最小化' }, { role: 'togglefullscreen', label: '全屏' },
+    ] },
   ]);
 }
 
@@ -72,11 +115,14 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
-    if (!existsSync(path.join(root, 'frontend/dist/index.html'))) throw new Error('请先运行 npm --prefix frontend run build。');
-    backend = await startBackend({ root, dataRoot: process.env.PIXELART_DATA_DIR, portFile: path.join(app.getPath('userData'), 'backend-port'), onExit: error => {
+    const devMode = process.env.PIXELART_DESKTOP_DEV === '1';
+    if (!devMode && !existsSync(path.join(root, 'frontend/dist/index.html'))) throw new Error('请先运行 npm --prefix frontend run build。');
+    const frontendPort = devMode ? await freePort() : undefined;
+    backend = await startBackend({ root, frontendPort, dataRoot: process.env.PIXELART_DATA_DIR, portFile: path.join(app.getPath('userData'), 'backend-port'), onExit: error => {
       if (!closing) { dialog.showErrorBox('PixelArting 本地服务', error.message); mainWindow?.destroy(); }
     } });
-    protocol.handle(DESKTOP_SCHEME, createProtocolHandler(backend.url, (url, options) => net.fetch(url, options)));
+    if (devMode) frontendDev = await startFrontendDev(root, backend.url, frontendPort);
+    if (!devMode) protocol.handle(DESKTOP_SCHEME, createProtocolHandler(backend.url, (url, options) => net.fetch(url, options)));
     const area = screen.getPrimaryDisplay().workAreaSize;
     mainWindow = new BrowserWindow({
       title: 'PixelArting', width: Math.min(1440, area.width), height: Math.min(1000, area.height),
@@ -100,12 +146,16 @@ if (!app.requestSingleInstanceLock()) {
     });
     mainWindow.webContents.on('will-navigate', (event, url) => {
       const target = new URL(url);
-      if (target.protocol !== `${DESKTOP_SCHEME}:` || target.host !== 'workbench') event.preventDefault();
+      const allowedDesktop = target.protocol === `${DESKTOP_SCHEME}:` && target.host === 'workbench';
+      const allowedDev = devMode && target.origin === frontendDev.origin;
+      if (!allowedDesktop && !allowedDev) event.preventDefault();
     });
     mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
       callback({ responseHeaders: {
         ...details.responseHeaders,
-        'Content-Security-Policy': ["default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"],
+        'Content-Security-Policy': [devMode
+          ? "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+          : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"],
       } });
     });
     mainWindow.webContents.on('will-prevent-unload', () => {
@@ -123,16 +173,18 @@ if (!app.requestSingleInstanceLock()) {
         .finally(() => { checkingClose = false; });
     });
     mainWindow.once('ready-to-show', () => mainWindow.show());
-    await mainWindow.loadURL(DESKTOP_URL);
+    await mainWindow.loadURL(devMode ? frontendDev.origin : DESKTOP_URL);
   }).catch(async error => {
     dialog.showErrorBox('PixelArting 启动失败', error.message);
     closing = true;
+    await frontendDev?.stop();
     await backend?.stop();
     app.quit();
   });
 
   app.on('window-all-closed', async () => {
     closing = true;
+    await frontendDev?.stop();
     await backend?.stop();
     app.quit();
   });

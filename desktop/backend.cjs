@@ -43,7 +43,7 @@ async function portAvailable(port) {
   }
 }
 
-async function startBackend({ root, python, dataRoot, portFile, onExit = () => {} }) {
+async function startBackend({ root, python, dataRoot, portFile, frontendPort, onExit = () => {} }) {
   python ||= process.env.PIXELART_PYTHON || path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   if (!existsSync(python)) throw new Error('找不到 Python 虚拟环境，请先按 README 安装后端依赖，或设置 PIXELART_PYTHON。');
   const persistedPortFile = portFile || (dataRoot ? path.join(dataRoot, '.desktop-port') : null);
@@ -53,7 +53,7 @@ async function startBackend({ root, python, dataRoot, portFile, onExit = () => {
   const child = spawn(python, ['-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', String(port)], {
     cwd: root,
     windowsHide: true,
-    env: { ...process.env, PIXELART_DESKTOP_PORT: String(port), ...(dataRoot ? { PIXELART_DATA_DIR: dataRoot } : {}) },
+    env: { ...process.env, PIXELART_DESKTOP_PORT: String(port), ...(frontendPort ? { PIXELART_DESKTOP_FRONTEND_PORT: String(frontendPort) } : {}), ...(dataRoot ? { PIXELART_DATA_DIR: dataRoot } : {}) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let logs = '', stopped = false, ready = false, spawnError;
@@ -98,4 +98,4 @@ async function startBackend({ root, python, dataRoot, portFile, onExit = () => {
   }
 }
 
-module.exports = { startBackend };
+module.exports = { startBackend, freePort };

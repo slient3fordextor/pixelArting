@@ -9,3 +9,6 @@ __pycache__/
 frontend/test-results/
 frontend/playwright-report/
 frontend/*.tsbuildinfo
+.idea/
+.codex/
+.vite/

@@ -59,6 +59,9 @@ def create_app(data_root: Path | None = None):
         desktop_port = os.environ.get("PIXELART_DESKTOP_PORT", "")
         if desktop_port.isdigit() and 1 <= int(desktop_port) <= 65535:
             ports.add(int(desktop_port))
+        frontend_port = os.environ.get("PIXELART_DESKTOP_FRONTEND_PORT", "")
+        if frontend_port.isdigit() and 1 <= int(frontend_port) <= 65535:
+            ports.add(int(frontend_port))
         allowed = {f"http://localhost:{p}" for p in ports} | {f"http://127.0.0.1:{p}" for p in ports}
         if request.method not in ("GET", "HEAD", "OPTIONS") and origin and origin not in allowed:
             return JSONResponse({"detail": "本地单用户模式不接受外部站点写入"}, status_code=403)
