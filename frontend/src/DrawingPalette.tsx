@@ -1,18 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { ArrowLeft, ArrowRight, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Plus, SlidersHorizontal, Square, Trash2, X } from 'lucide-react';
 import { DEFAULT_SWATCHES, MAX_RECENT_COLORS, MAX_SWATCHES, RECENT_COLORS_KEY, drawingPaletteKey, normalizeColors, readColors } from './paletteSettings';
 
-export function DrawingPalette({ projectId, colorRef, palette, pickedColor }: { projectId: string; colorRef: RefObject<string>; palette: string[]; pickedColor?: { color: string } | null }) {
+type PickedColor = { color: string; opacity?: number };
+
+export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, pickedColor, onOpacityChange }: { projectId: string; colorRef: RefObject<string>; colorOpacityRef: RefObject<number>; palette: string[]; pickedColor?: PickedColor | null; onOpacityChange: (value: number) => void }) {
   const [color, setColor] = useState(colorRef.current.toUpperCase());
   const [customSwatches, setCustomSwatches] = useState(() => readColors(drawingPaletteKey(projectId)));
   const [recent, setRecent] = useState(() => (readColors(RECENT_COLORS_KEY) ?? []).slice(0, MAX_RECENT_COLORS));
   const [managing, setManaging] = useState(false);
+  const [opacity, setOpacity] = useState(() => Math.max(0, Math.min(100, colorOpacityRef.current)));
+  const [background, setBackground] = useState(() => {
+    try { return localStorage.getItem('pixelart-background-color-v1')?.toUpperCase() || '#FFFFFF'; } catch { return '#FFFFFF'; }
+  });
   const [storageError, setStorageError] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const managerToggleRef = useRef<HTMLButtonElement>(null);
   const updateFrame = useRef<number | null>(null);
   const draggedColor = useRef<string | null>(null);
+  const foregroundRef = useRef(colorRef.current.toUpperCase());
+  const preserveForeground = useRef(false);
   const lastPickedColor = useRef(pickedColor);
   const projectSwatches = normalizeColors(palette);
   const swatches = customSwatches ?? (projectSwatches.length ? projectSwatches : DEFAULT_SWATCHES);
@@ -46,14 +54,34 @@ export function DrawingPalette({ projectId, colorRef, palette, pickedColor }: { 
     if (!pickedColor || pickedColor === lastPickedColor.current) return;
     lastPickedColor.current = pickedColor;
     colorRef.current = pickedColor.color;
+    foregroundRef.current = pickedColor.color.toUpperCase();
+    if (pickedColor.opacity !== undefined) {
+      const nextOpacity = Math.max(0, Math.min(100, Math.round(pickedColor.opacity)));
+      colorOpacityRef.current = nextOpacity;
+      setOpacity(nextOpacity);
+      onOpacityChange(nextOpacity);
+    }
     if (inputRef.current) inputRef.current.value = pickedColor.color;
     setColor(pickedColor.color.toUpperCase());
     remember(pickedColor.color);
-  }, [pickedColor, colorRef, remember]);
+  }, [pickedColor, colorRef, colorOpacityRef, onOpacityChange, remember]);
+
+  useEffect(() => {
+    try { localStorage.setItem('pixelart-background-color-v1', background); } catch { /* Storage may be unavailable. */ }
+  }, [background]);
+
+  function updateOpacity(value: number) {
+    const next = Math.max(0, Math.min(100, Math.round(value)));
+    colorOpacityRef.current = next;
+    setOpacity(next);
+    onOpacityChange(next);
+  }
 
   function pick(next: string) {
     // Brush events need the latest color even before the next display frame.
     colorRef.current = next;
+    if (!preserveForeground.current) foregroundRef.current = next.toUpperCase();
+    preserveForeground.current = false;
     if (updateFrame.current !== null) return;
     updateFrame.current = requestAnimationFrame(() => {
       updateFrame.current = null;
@@ -65,6 +93,19 @@ export function DrawingPalette({ projectId, colorRef, palette, pickedColor }: { 
     if (inputRef.current) inputRef.current.value = next;
     pick(next);
     remember(next);
+  }
+
+  function chooseBackground() {
+    preserveForeground.current = true;
+    choose(background);
+    updateOpacity(100);
+  }
+
+  function swapColors() {
+    const foreground = colorRef.current.toUpperCase();
+    const next = foregroundRef.current;
+    setBackground(foreground);
+    choose(next);
   }
 
   function moveSwatch(source: string, target: string) {
@@ -83,7 +124,12 @@ export function DrawingPalette({ projectId, colorRef, palette, pickedColor }: { 
     }
   }}>
     <div className="palette-strip">
-      <label className="color-input" title="绘图颜色"><input ref={inputRef} type="color" aria-label="绘图颜色" defaultValue={colorRef.current} onInput={event => pick(event.currentTarget.value)} onBlur={event => remember(event.currentTarget.value)} /></label>
+      <label className="color-input" title="前景色"><input ref={inputRef} type="color" aria-label="绘图颜色" defaultValue={colorRef.current} onInput={event => pick(event.currentTarget.value)} onBlur={event => remember(event.currentTarget.value)} /></label>
+      <button className="color-role foreground-color" type="button" aria-label="使用前景色" title="前景色" style={{ backgroundColor: color }} onClick={() => updateOpacity(opacity)}><span>前</span></button>
+      <button className="color-role background-color" type="button" aria-label="使用背景色" title={`背景色 ${background}`} style={{ backgroundColor: background }} onClick={chooseBackground}><span>后</span></button>
+      <label className="background-picker" title="设置背景色"><input type="color" aria-label="背景色" value={background} onChange={event => setBackground(event.currentTarget.value.toUpperCase())} /></label>
+      <button className="icon-button palette-action" type="button" aria-label="交换前景色和背景色" title="交换前景色和背景色" onClick={swapColors}><ArrowLeft size={13} /><ArrowRight size={13} /></button>
+      <button className="transparent-color" type="button" aria-label="使用透明色" title="透明色" onClick={() => updateOpacity(0)}><span><Square size={14} /><X size={10} /></span></button>
       <span className="palette-divider" />
       <div className="palette-swatches" role="group" aria-label="绘图色板">
         {swatches.length === 0 && <span className="palette-hint">色板为空，点击 + 添加颜色</span>}
@@ -103,6 +149,10 @@ export function DrawingPalette({ projectId, colorRef, palette, pickedColor }: { 
       <button className="icon-button palette-action" type="button" aria-label="添加当前颜色到色板" title={swatches.includes(color) ? '当前颜色已在色板中' : `添加当前颜色（最多 ${MAX_SWATCHES} 色）`} disabled={swatches.includes(color) || swatches.length >= MAX_SWATCHES} onClick={() => setCustomSwatches([...swatches, color])}><Plus size={15} /></button>
       <button ref={managerToggleRef} className={`icon-button palette-action ${managing ? 'active' : ''}`} type="button" aria-label="管理色板" title="管理色板" aria-expanded={managing} aria-controls="palette-manager" onClick={() => setManaging(value => !value)}><SlidersHorizontal size={15} /></button>
       <span className="color-hex">{color}</span>
+    </div>
+    <div className="palette-opacity">
+      <label><span>颜色不透明度</span><input aria-label="颜色不透明度" type="range" min="0" max="100" step="1" value={opacity} onChange={event => updateOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
+      <span className="palette-hint">前景色</span>
     </div>
     <div className="palette-recent" role="group" aria-label="最近使用颜色">
       <span className="palette-label">最近</span>

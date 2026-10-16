@@ -40,6 +40,7 @@ type Props = {
   activeLayer: string;
   tool: DrawingTool;
   colorRef: RefObject<string>;
+  colorOpacityRef?: RefObject<number>;
   brushSize?: number;
   brushOpacity?: number;
   brushShape?: BrushShape;
@@ -56,7 +57,7 @@ type Props = {
   finding?: Finding | null;
   difference?: Rect | null;
   onChange?: (image: string) => void;
-  onPickColor?: (color: string) => void;
+  onPickColor?: (color: string, opacity?: number) => void;
   onZoomChange?: (zoom: number) => void;
   onSelectionChange?: (selection: Rect | null) => void;
   onClipboardChange?: (available: boolean) => void;
@@ -66,7 +67,7 @@ type Props = {
 function clamp(value: number, max: number) {
   return Math.max(0, Math.min(max - 1, value));
 }
-function colorToRgba(color: string): [number, number, number, number] {
+function colorToRgba(color: string, opacity = 100): [number, number, number, number] {
   const value = color.replace('#', '').trim();
   const normalized =
     value.length === 3
@@ -76,7 +77,7 @@ function colorToRgba(color: string): [number, number, number, number] {
           .join('')
       : value;
   const number = Number.parseInt(normalized || '000000', 16);
-  return [(number >> 16) & 255, (number >> 8) & 255, number & 255, 255];
+  return [(number >> 16) & 255, (number >> 8) & 255, number & 255, Math.round(Math.max(0, Math.min(100, opacity)) * 2.55)];
 }
 function rgbaToHex(data: Uint8ClampedArray, offset: number) {
   return `#${[data[offset], data[offset + 1], data[offset + 2]].map((value) => value.toString(16).padStart(2, '0')).join('')}`;
@@ -123,6 +124,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     activeLayer,
     tool,
     colorRef,
+    colorOpacityRef,
     brushSize = 1,
     brushOpacity = 100,
     brushShape = 'square',
@@ -514,10 +516,13 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     context.globalAlpha = 1;
     context.putImageData(snapshot.current, 0, 0);
     context.fillStyle = colorRef.current;
+    context.globalAlpha = Math.max(0, Math.min(1, (colorOpacityRef?.current ?? 100) / 100));
+    context.globalCompositeOperation = (colorOpacityRef?.current ?? 100) === 0 ? 'destination-out' : 'source-over';
     const [from, to] = shapeEndpoints(tool, start.current, point, shift, alt);
     const stroke = Math.max(1, Math.min(16, Math.round(shapeStrokeSize)));
     if (tool === 'line') line(context, from, to, false, stroke);
     else drawBoxShape(context, tool, from, to, stroke, shapeMode, inside);
+    context.globalCompositeOperation = 'source-over';
     changed.current = true;
     drawRef.current();
   }
@@ -529,7 +534,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     const sampleContext = samplingContext(fillSettings.sample);
     if (!sampleContext) return false;
     const reference = sampleContext.getImageData(0, 0, frame.width, frame.height);
-    const replacement = colorToRgba(colorRef.current);
+    const replacement = colorToRgba(colorRef.current, colorOpacityRef?.current ?? 100);
     if (!fillPixels(image, reference, point, replacement, fillSettings, inside)) return false;
     context.putImageData(image, 0, 0);
     return true;
@@ -592,8 +597,11 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
       // Pointer movement within a pixel and pointer-up must not stamp it again.
       if (previous.current?.[0] === point[0] && previous.current[1] === point[1]) return;
       context.fillStyle = colorRef.current;
-      context.globalAlpha = tool === 'eraser' ? 1 : Math.max(0.01, Math.min(1, brushOpacity / 100));
-      line(context, previous.current ?? point, point, tool === 'eraser', brushSize, brushShape);
+      const transparent = (colorOpacityRef?.current ?? 100) === 0;
+      context.globalAlpha = tool === 'eraser' || transparent ? 1 : Math.max(0, Math.min(1, (brushOpacity / 100) * ((colorOpacityRef?.current ?? 100) / 100)));
+      context.globalCompositeOperation = transparent ? 'destination-out' : 'source-over';
+      line(context, previous.current ?? point, point, tool === 'eraser' || transparent, brushSize, brushShape);
+      context.globalCompositeOperation = 'source-over';
       context.globalAlpha = 1;
       previous.current = point;
       changed.current = true;
@@ -732,7 +740,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
             event.currentTarget.setPointerCapture(event.pointerId);
             if (tool === 'eyedropper') {
               const data = samplingContext(eyedropperSample)?.getImageData(point[0], point[1], 1, 1).data;
-              if (data && data[3] > 0) onPickColor?.(rgbaToHex(data, 0));
+              if (data && data[3] > 0) onPickColor?.(rgbaToHex(data, 0), Math.round(data[3] / 2.55));
               return;
             }
             if (tool === 'select') {
@@ -766,7 +774,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
             if (!context) return;
             if (tool === 'fill') {
               context.imageSmoothingEnabled = false;
-              context.globalAlpha = 1;
+              context.globalAlpha = Math.max(0, Math.min(1, (colorOpacityRef?.current ?? 100) / 100));
               context.fillStyle = colorRef.current;
               if (fillAt(point, context)) {
                 drawRef.current();

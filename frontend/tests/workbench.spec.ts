@@ -72,7 +72,7 @@ test('continuous color selection uses the latest color without editing the docum
     element.getContext('2d')!.getImageData(32, 32, 1, 1).data[3]
   )).toBeGreaterThan(0);
   const before = await canvas.evaluate((element: HTMLCanvasElement) => element.toDataURL());
-  const picker = page.getByLabel('绘图颜色');
+  const picker = page.locator('input[type="color"][aria-label="绘图颜色"]');
   await picker.evaluate((element: HTMLInputElement) => {
     for (let index = 0; index < 120; index++) {
       element.value = `#${(index * 7919).toString(16).padStart(6, '0')}`;
@@ -98,6 +98,45 @@ test('continuous color selection uses the latest color without editing the docum
   await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) =>
     Array.from(element.getContext('2d')!.getImageData(5, 4, 1, 1).data)
   )).toEqual([36, 52, 62, 255]);
+});
+
+test('color picker controls opacity, foreground/background, swapping and transparent paint', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto('/');
+  await expect(page.getByLabel('像素编辑画布')).toHaveAttribute('aria-busy', 'false');
+  await page.locator('.assets-label').getByRole('button', { name: '新建素材', exact: true }).click();
+  await page.getByLabel('素材名称').fill('颜色选择器测试');
+  await page.getByRole('button', { name: '创建素材', exact: true }).click();
+  const canvas = page.getByLabel('像素编辑画布');
+  await expect(canvas).toHaveAttribute('aria-busy', 'false');
+  const rect = await canvas.boundingBox();
+  expect(rect).not.toBeNull();
+  const point = (x: number, y: number) => ({ x: rect!.x + rect!.width * (x + 0.5) / 64, y: rect!.y + rect!.height * (y + 0.5) / 64 });
+  const pixel = (x: number, y: number) => canvas.evaluate((element: HTMLCanvasElement, position) => Array.from(element.getContext('2d')!.getImageData(position.x, position.y, 1, 1).data), { x, y });
+  await page.getByRole('button', { name: '铅笔 (B)', exact: true }).click();
+  const opacity = page.getByLabel('颜色不透明度');
+  await opacity.press('Home');
+  for (let index = 0; index < 50; index++) await opacity.press('ArrowRight');
+  await expect(opacity).toHaveValue('50');
+  await page.mouse.click(point(20, 20).x, point(20, 20).y);
+  await expect.poll(async () => (await pixel(20, 20))[3]).toBe(128);
+  const translucent = await pixel(20, 20);
+  expect(Math.abs(translucent[0] - 33)).toBeLessThanOrEqual(1);
+  expect(Math.abs(translucent[1] - 143)).toBeLessThanOrEqual(1);
+  expect(Math.abs(translucent[2] - 131)).toBeLessThanOrEqual(1);
+  await page.locator('input[type="color"][aria-label="背景色"]').fill('#ff0000');
+  await page.getByRole('button', { name: '使用背景色' }).click();
+  await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#ff0000');
+  await page.getByRole('button', { name: '交换前景色和背景色' }).click();
+  await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#218f83');
+  await page.getByRole('button', { name: '使用透明色' }).click();
+  await expect(opacity).toHaveValue('0');
+  await page.mouse.click(point(20, 20).x, point(20, 20).y);
+  await expect.poll(() => pixel(20, 20)).toEqual([0, 0, 0, 0]);
+  await opacity.fill('100');
+  await expect(opacity).toHaveValue('100');
+  await page.waitForTimeout(100);
+  await page.evaluate(() => localStorage.removeItem('pixelart-color-opacity-v1'));
 });
 
 test('first-phase pixel tools draw shapes, fill pixels and expose selection controls', async ({ page }) => {
@@ -126,7 +165,7 @@ test('first-phase pixel tools draw shapes, fill pixels and expose selection cont
   await page.mouse.move(point(44, 22).x, point(44, 22).y);
   await page.mouse.up();
   await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => {
-    const data = element.getContext('2d')!.getImageData(32, 10, 1, 1).data;
+    const data = element.getContext('2d')!.getImageData(38, 10, 1, 1).data;
     return data[3];
   })).toBeGreaterThan(0);
   await page.getByRole('button', { name: '矩形选区 (M)', exact: true }).click();

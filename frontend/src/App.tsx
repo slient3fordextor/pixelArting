@@ -49,6 +49,7 @@ const BRUSH_SHAPE_STORAGE_KEY = 'pixelart-brush-shape-v1';
 const SHAPE_SETTINGS_STORAGE_KEY = 'pixelart-shape-settings-v1';
 const FILL_SETTINGS_STORAGE_KEY = 'pixelart-fill-settings-v1';
 const EYEDROPPER_SAMPLE_STORAGE_KEY = 'pixelart-eyedropper-sample-v1';
+const COLOR_OPACITY_STORAGE_KEY = 'pixelart-color-opacity-v1';
 
 function readEyedropperSample(): ColorSampleSource {
   try { return localStorage.getItem(EYEDROPPER_SAMPLE_STORAGE_KEY) === 'layer' ? 'layer' : 'merged'; }
@@ -93,6 +94,13 @@ function readBrushShape(): BrushShape {
   }
 }
 
+function readColorOpacity() {
+  try {
+    const value = Number.parseInt(localStorage.getItem(COLOR_OPACITY_STORAGE_KEY) || '100', 10);
+    return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 100;
+  } catch { return 100; }
+}
+
 type StoredDraft = {
   assetId: string;
   baseVersionId: string;
@@ -132,8 +140,10 @@ export default function App() {
   const [shapeSettings, setShapeSettings] = useState(readShapeSettings);
   const [fillSettings, setFillSettings] = useState(readFillSettings);
   const [eyedropperSample, setEyedropperSample] = useState(readEyedropperSample);
-  const [pickedColor, setPickedColor] = useState<{ color: string } | null>(null);
+  const [pickedColor, setPickedColor] = useState<{ color: string; opacity?: number } | null>(null);
   const colorRef = useRef('#218F83');
+  const colorOpacityRef = useRef(readColorOpacity());
+  const [colorOpacity, setColorOpacity] = useState(colorOpacityRef.current);
   const [zoom, setZoom] = useState(window.innerWidth < 600 ? 3 : window.innerHeight < 850 ? 4 : 6);
   const [grid, setGrid] = useState(false);
   const [guides, setGuides] = useState(true);
@@ -263,6 +273,10 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem(EYEDROPPER_SAMPLE_STORAGE_KEY, eyedropperSample); } catch { /* Storage may be unavailable. */ }
   }, [eyedropperSample]);
+  useEffect(() => {
+    colorOpacityRef.current = colorOpacity;
+    try { localStorage.setItem(COLOR_OPACITY_STORAGE_KEY, String(colorOpacity)); } catch { /* Storage may be unavailable. */ }
+  }, [colorOpacity]);
 
   useEffect(() => {
     const panCanvas = (event: WheelEvent) => {
@@ -1219,15 +1233,15 @@ export default function App() {
           </div>
         </WorkspacePanel>
         <div ref={stageRef} className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
-          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={color => { colorRef.current = color; setPickedColor({ color }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
-          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
+          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={(color, opacity) => { colorRef.current = color; setPickedColor({ color, opacity }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
+          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
         </div>
         <div className="canvas-toolbar" aria-label="画布操作">
           <div className="tool-group selection-tools" role="group" aria-label="编辑操作"><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /></div>
           <div className="tool-group canvas-view-tools"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= MIN_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, -1))} /><CanvasZoomControl zoom={zoom} disabled={drawingStroke} onChange={value => { setZoom(value); locateCanvas(); }} /><IconButton icon={ZoomIn} label="放大" disabled={zoom >= MAX_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, 1))} /><button className="button secondary canvas-locate" type="button" aria-label="适应窗口 (Shift+F)" title="适应窗口 (Shift+F)" disabled={drawingStroke} onClick={() => fitCanvas()}><Maximize size={15} />适应窗口</button><button className="button secondary canvas-locate" type="button" aria-label="填充窗口" title="按受限边精确贴合可绘图区域，完整显示画布" disabled={drawingStroke} onClick={() => fitCanvas('fill')}><ScanLine size={15} />填充窗口</button><button className="button secondary canvas-locate" type="button" aria-label="定位画布 (F)" title="定位画布 (F)" disabled={drawingStroke} onClick={locateCanvas}><Focus size={15} />定位画布</button></div>
         </div>
         {preview ? <><div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><label>帧<select aria-label="修复预览帧" value={frameIndex} disabled={busy} onChange={event => setFrameIndex(Number(event.target.value))}>{draft.frames.map((item, index) => <option key={item.id} value={index}>{index + 1}</option>)}</select></label><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div>{previewChange ? <RepairSummary change={previewChange} /> : null}</> : null}
-        <WorkspacePanel {...panelProps('palette')} className="palette-panel"><DrawingPalette key={projectId} projectId={projectId} colorRef={colorRef} palette={config.palette} pickedColor={pickedColor} /></WorkspacePanel>
+        <WorkspacePanel {...panelProps('palette')} className="palette-panel"><DrawingPalette key={projectId} projectId={projectId} colorRef={colorRef} colorOpacityRef={colorOpacityRef} palette={config.palette} pickedColor={pickedColor} onOpacityChange={setColorOpacity} /></WorkspacePanel>
         <WorkspacePanel {...panelProps('timeline')} className="timeline" actions={<><small>{draft.frames.length} 帧</small><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><IconButton icon={FilePlus2} label="新建空白帧" disabled={locked || draft.frames.length >= 64} onClick={() => createBlankFrame(frameIndex)} /><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></>}>
           <><div className="frame-list">{draft.frames.map((f, i) => { const mappingIndex = currentAnimation?.frames.findIndex(ref => ref.frameId === f.id) ?? -1; const mapped = mappingIndex >= 0 ? currentAnimation?.frames[mappingIndex] : undefined; return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setAnimationFrameIndex(null); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">#{mappingIndex + 1} · {mapped.durationMs} ms</small> : null}</button>; })}</div>
           <div className="animation-controls">
