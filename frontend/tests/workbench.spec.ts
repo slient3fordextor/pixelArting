@@ -129,6 +129,14 @@ test('color picker controls opacity, foreground/background, swapping and transpa
   await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#ff0000');
   await page.getByRole('button', { name: '交换前景色和背景色' }).click();
   await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#218f83');
+  await page.getByRole('button', { name: '高级颜色选择器' }).click();
+  await expect(page.getByRole('group', { name: '高级颜色选择器' })).toBeVisible();
+  await page.getByLabel('红色通道').fill('255');
+  await page.getByLabel('绿色通道').fill('0');
+  await page.getByLabel('蓝色通道').fill('0');
+  await expect(page.locator('.color-hex')).toHaveText('#FF0000');
+  await page.getByLabel('色相').fill('120');
+  await expect(page.locator('.color-hex')).toHaveText('#00FF00');
   await page.getByRole('button', { name: '使用透明色' }).click();
   await expect(opacity).toHaveValue('0');
   await page.mouse.click(point(20, 20).x, point(20, 20).y);
