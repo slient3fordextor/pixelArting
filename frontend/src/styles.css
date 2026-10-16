@@ -212,6 +212,8 @@ small { font-size: 11px; color: #8a909a; font-weight: 400; }
 .animation-controls .button { font-size: 11px; min-height: 30px; padding: 5px 10px; }
 .animation-controls .loop-toggle { white-space: nowrap; }
 .animation-controls .loop-toggle input { width: 14px; height: 14px; margin: 0; }
+.animation-controls .playback-mode-control { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.animation-controls .playback-mode-control select { width: 66px; min-height: 26px; padding: 3px 5px; font-size: 10px; }
 .mapping-count { font-size: 10px; color: #929aa4; }
 .animation-sequence { display: flex; gap: 6px; overflow-x: auto; padding: 8px 1px 1px; }
 .animation-step { width: 76px; height: 59px; display: flex; flex-direction: column; align-items: center; gap: 3px; flex-shrink: 0; padding: 4px; border: 1px solid #e0e5e9; border-radius: 4px; background: #f8f9fa; }

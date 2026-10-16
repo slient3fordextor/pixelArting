@@ -40,6 +40,15 @@ function IconButton({ icon: Icon, label, onClick, disabled = false, active = fal
 }
 
 const directionNames: Record<Direction, string> = { down: '下', left: '左', right: '右', up: '上' };
+type PlaybackMode = 'forward' | 'reverse' | 'pingpong';
+type PlaybackFrame = { frameId: string; durationMs: number };
+
+function arrangePlayback(sequence: PlaybackFrame[], mode: PlaybackMode) {
+  if (mode === 'reverse') return [...sequence].reverse();
+  if (mode === 'pingpong' && sequence.length > 1) return [...sequence, ...sequence.slice(0, -1).reverse()];
+  return sequence;
+}
+
 const statusNames: Record<string, string> = { passed: '通过', findings: '问题', skipped: '跳过', disabled: '关闭', failed: '失败' };
 const DRAFT_STORAGE_PREFIX = 'pixelart-draft-v1:';
 const CONFIG_DRAFT_STORAGE_PREFIX = 'pixelart-config-draft-v1:';
@@ -179,6 +188,7 @@ export default function App() {
   const [renameValue, setRenameValue] = useState('');
   const [action, setAction] = useState<'idle' | 'walk'>('idle');
   const [direction, setDirection] = useState<Direction>('down');
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>('forward');
   const [animationFrameIndex, setAnimationFrameIndex] = useState<number | null>(null);
   const [duration, setDuration] = useState(200);
   const layerInput = useRef<HTMLInputElement>(null);
@@ -500,7 +510,7 @@ export default function App() {
   useEffect(() => {
     if (!playing || !draft) return;
     const animation = draft.animations.find(a => a.action === action && a.direction === direction);
-    const sequence = animation?.frames ?? draft.frames.map(frame => ({ frameId: frame.id, durationMs: duration }));
+    const sequence = arrangePlayback(animation?.frames ?? draft.frames.map(frame => ({ frameId: frame.id, durationMs: duration })), playbackMode);
     if (!sequence.length) { setPlaying(false); return; }
     let index = 0;
     let timer: ReturnType<typeof setTimeout>;
@@ -516,7 +526,7 @@ export default function App() {
     };
     advance();
     return () => clearTimeout(timer);
-  }, [playing, draft, action, direction]);
+  }, [playing, draft, action, direction, playbackMode]);
 
   async function run(task: () => Promise<void>, success?: string) {
     completeStroke();
@@ -896,9 +906,10 @@ export default function App() {
   function togglePlayback() {
     if (playing) { setPlaying(false); return; }
     if (!draft || busy || preview || (!currentAnimation && !validDuration)) return;
-    const firstId = currentAnimation?.frames[0].frameId ?? draft.frames[0].id;
+    const sequence = arrangePlayback(currentAnimation?.frames ?? draft.frames.map(item => ({ frameId: item.id, durationMs: duration })), playbackMode);
+    const firstId = sequence[0]?.frameId ?? draft.frames[0].id;
     setFrameIndex(draft.frames.findIndex(frame => frame.id === firstId));
-    setAnimationFrameIndex(currentAnimation ? 0 : null);
+    setAnimationFrameIndex(currentAnimation ? currentAnimation.frames.findIndex(frame => frame.frameId === firstId) : null);
     setPlaying(true);
   }
 
@@ -1248,6 +1259,7 @@ export default function App() {
             <select aria-label="动作" value={action} disabled={busy || !!preview} onChange={e => selectAnimation(e.target.value as typeof action, direction)}><option value="idle">idle</option><option value="walk">walk</option></select>
             <select aria-label="方向" value={direction} disabled={busy || !!preview} onChange={e => selectAnimation(action, e.target.value as Direction)}>{Object.entries(directionNames).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select>
             <label><input aria-label="帧时长" type="number" min={1} max={60000} step={1} value={duration} disabled={locked} onChange={e => setDuration(Number(e.target.value))} /> ms</label>
+            <label className="playback-mode-control">播放方式<select aria-label="播放方式" value={playbackMode} disabled={locked} onChange={e => { setPlaybackMode(e.target.value as PlaybackMode); setPlaying(false); }}><option value="forward">正向</option><option value="reverse">反向</option><option value="pingpong">往返</option></select></label>
             <button className="button secondary" disabled={locked || !validDuration || (!currentRef && (currentAnimation?.frames.length ?? 0) >= 128)} onClick={updateAnimationFrame}>{currentRef ? '更新时长' : '加入动画'}</button>
             <IconButton icon={CheckCheck} label="加入全部帧" disabled={locked || !validDuration || (currentAnimation?.frames.length ?? 0) >= 128 || draft.frames.every(item => currentAnimation?.frames.some(ref => ref.frameId === item.id))} onClick={addAllAnimationFrames} />
             <IconButton icon={X} label="移除当前帧" disabled={locked || !currentRef} onClick={removeCurrentAnimationFrame} />

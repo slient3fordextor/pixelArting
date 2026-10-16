@@ -574,6 +574,14 @@ test('frame timeline switches frames and previews unassigned sequences', async (
   const play = page.getByRole('button', { name: '播放动画', exact: true });
   await expect(play).toBeEnabled();
   await page.getByLabel('帧时长').fill('600');
+  const playbackMode = page.getByLabel('播放方式');
+  await expect(playbackMode.locator('option')).toHaveCount(3);
+  await playbackMode.selectOption('reverse');
+  await play.click();
+  await expect(page.locator('.frame-item.selected')).toHaveAttribute('aria-label', '第 2 帧');
+  await page.getByRole('button', { name: '暂停', exact: true }).click();
+  await playbackMode.selectOption('pingpong');
+  await expect(playbackMode).toHaveValue('pingpong');
   await play.click();
   await expect.poll(() => page.locator('.frame-item.selected').getAttribute('aria-label'), { timeout: 1000 }).toBe('第 2 帧');
   await page.getByRole('button', { name: '暂停', exact: true }).click();
