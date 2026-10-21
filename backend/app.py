@@ -306,24 +306,24 @@ def create_app(data_root: Path | None = None):
         return retain_png(store.root, await file.read(MAX_UPLOAD_BYTES + 1))
 
     @app.post("/api/projects/{project_id}/imports/preview")
-    async def import_preview(project_id: str, file: UploadFile = File(...), cellWidth: int = Form(0), cellHeight: int = Form(0), marginX: int = Form(0), marginY: int = Form(0), spacingX: int = Form(0), spacingY: int = Form(0), rows: int = Form(0), columns: int = Form(0)):
+    async def import_preview(project_id: str, file: UploadFile = File(...), cellWidth: int = Form(0), cellHeight: int = Form(0), marginX: int = Form(0), marginY: int = Form(0), spacingX: int = Form(0), spacingY: int = Form(0), rows: int = Form(0), columns: int = Form(0), offsetX: int = Form(0), offsetY: int = Form(0), cropMode: str = Form("strict")):
         """预览行优先切分，不创建素材。marginX/Y 是左右/上下的对称边距，
         spacingX/Y 是单帧间距，rows/columns 为 0 时自动推算；布局必须精确覆盖 PNG。
         校验通过的原始 PNG 会保留到 sources/<sha256>.png，即使随后布局检查失败。
         """
         image, digest = await read_import_source(project_id, file)
-        layout = SheetLayout(cellWidth=cellWidth, cellHeight=cellHeight, marginX=marginX, marginY=marginY, spacingX=spacingX, spacingY=spacingY, rows=rows, columns=columns)
+        layout = SheetLayout(cellWidth=cellWidth, cellHeight=cellHeight, marginX=marginX, marginY=marginY, spacingX=spacingX, spacingY=spacingY, rows=rows, columns=columns, offsetX=offsetX, offsetY=offsetY, cropMode=cropMode)
         return preview_import(image, layout, digest)
 
     @app.post("/api/projects/{project_id}/assets", status_code=201)
-    async def upload(project_id: str, file: UploadFile = File(...), name: str = Form(""), cellWidth: int = Form(0), cellHeight: int = Form(0), marginX: int = Form(0), marginY: int = Form(0), spacingX: int = Form(0), spacingY: int = Form(0), rows: int = Form(0), columns: int = Form(0), mapping: str = Form("[]"), mappingConfirmed: bool = Form(False)):
+    async def upload(project_id: str, file: UploadFile = File(...), name: str = Form(""), cellWidth: int = Form(0), cellHeight: int = Form(0), marginX: int = Form(0), marginY: int = Form(0), spacingX: int = Form(0), spacingY: int = Form(0), rows: int = Form(0), columns: int = Form(0), offsetX: int = Form(0), offsetY: int = Form(0), cropMode: str = Form("strict"), mapping: str = Form("[]"), mappingConfirmed: bool = Form(False)):
         """确认导入。布局参数与 imports/preview 相同。mapping 是 JSON 数组，
         每项包含从 0 开始的 frameIndex、action(idle/walk)、direction(down/left/right/up)，
         以及可选 durationMs(默认 200)。非空映射必须传 mappingConfirmed=true，
         同一动作方向按原 PNG 行优先帧序组成动画；未映射帧仍保留。
         """
         image, digest = await read_import_source(project_id, file)
-        layout = SheetLayout(cellWidth=cellWidth, cellHeight=cellHeight, marginX=marginX, marginY=marginY, spacingX=spacingX, spacingY=spacingY, rows=rows, columns=columns)
+        layout = SheetLayout(cellWidth=cellWidth, cellHeight=cellHeight, marginX=marginX, marginY=marginY, spacingX=spacingX, spacingY=spacingY, rows=rows, columns=columns, offsetX=offsetX, offsetY=offsetY, cropMode=cropMode)
         document = imported_document(image, layout, digest, file.filename, name, mapping, mappingConfirmed)
         return store.create_asset(project_id, document)
 

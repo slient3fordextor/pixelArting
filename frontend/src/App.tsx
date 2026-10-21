@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronRight, ClipboardPaste, Copy, CopyPlus, Download, Eraser, Eye, EyeOff,
-  FilePlus2, Folder, Grid2X2, Hand, History, ImagePlus, Layers, Lock, Minus, Move, PaintBucket, Pause, Pencil, Pipette, Play, Plus, Redo2,
+  FilePlus2, Folder, Grid2X2, Hand, History, ImagePlus, Layers, Layers2, Lock, Minus, Move, PaintBucket, Pause, Pencil, Pipette, Play, Plus, Redo2,
   Circle, Crosshair, Focus, Maximize, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Scissors, Square, SquareDashedMousePointer,
   RefreshCw, Save, ScanLine, Settings2, Trash2, Undo2, Unlock, Upload, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
@@ -12,7 +12,12 @@ import { api, blankImage, loadImage } from './api';
 import { CanvasEditor } from './CanvasEditor';
 import { CanvasZoomControl } from './CanvasZoomControl';
 import { FillToolSettings } from './FillToolSettings';
+import { ToolSettingsPopover } from './ToolSettingsPopover';
+import { BrushPreview } from './BrushPreview';
 import { EyedropperToolSettings } from './EyedropperToolSettings';
+import { SelectionToolSettings } from './SelectionToolSettings';
+import { LayerList } from './LayerList';
+import { mergeLayerPixels } from './layerPixels';
 import { WorkspacePanel } from './WorkspacePanel';
 import { WorkspaceWindowMenu } from './WorkspaceWindowMenu';
 import { useWorkspaceLayout } from './workspaceLayout';
@@ -33,11 +38,27 @@ import { AIControls } from './AIControls';
 import { ContextMenu } from './ContextMenu';
 import type { MenuItem } from './ContextMenu';
 import { defaultConfig, RULE_NAMES } from './types';
-import type { Asset, AssetItem, CheckConfig, ColorSampleSource, Direction, Document, Finding, Frame, Layer, Preview, Project, Report } from './types';
+import type { Asset, AssetItem, BlendMode, CheckConfig, ColorSampleSource, Direction, Document, Finding, Frame, Layer, Preview, Project, Report } from './types';
 
 function IconButton({ icon: Icon, label, onClick, disabled = false, active = false, ariaExpanded }: { icon: LucideIcon; label: string; onClick: () => void; disabled?: boolean; active?: boolean; ariaExpanded?: boolean }) {
   return <button className={`icon-button ${active ? 'active' : ''}`} type="button" title={label} aria-label={label} aria-expanded={ariaExpanded} onClick={onClick} disabled={disabled}><Icon size={17} /></button>;
 }
+
+const drawingTools: { value: DrawingTool; label: string; icon: LucideIcon }[] = [
+  { value: 'pencil', label: '铅笔 (B)', icon: Pencil },
+  { value: 'eraser', label: '橡皮 (E)', icon: Eraser },
+  { value: 'eyedropper', label: '取色器 (I)', icon: Pipette },
+  { value: 'fill', label: '填充 (G)', icon: PaintBucket },
+  { value: 'line', label: '直线 (L)', icon: Minus },
+  { value: 'rectangle', label: '矩形 (R)', icon: Square },
+  { value: 'ellipse', label: '椭圆 (O)', icon: Circle },
+  { value: 'select', label: '矩形选区 (M)', icon: SquareDashedMousePointer },
+  { value: 'lasso', label: '套索选区 (Q)', icon: SquareDashedMousePointer },
+  { value: 'color-select', label: '按颜色选择', icon: Pipette },
+  { value: 'magic-wand', label: '魔棒选择', icon: PaintBucket },
+  { value: 'pan', label: '移动画布 (H)', icon: Hand },
+  { value: 'move-layer', label: '移动图层 (V)', icon: Move },
+];
 
 const directionNames: Record<Direction, string> = { down: '下', left: '左', right: '右', up: '上' };
 type PlaybackMode = 'forward' | 'reverse' | 'pingpong';
@@ -80,6 +101,8 @@ const CONFIG_DRAFT_STORAGE_PREFIX = 'pixelart-config-draft-v1:';
 const BRUSH_SIZE_STORAGE_KEY = 'pixelart-brush-size-v1';
 const BRUSH_OPACITY_STORAGE_KEY = 'pixelart-brush-opacity-v1';
 const BRUSH_SHAPE_STORAGE_KEY = 'pixelart-brush-shape-v1';
+const BRUSH_PRESSURE_STORAGE_KEY = 'pixelart-brush-pressure-v1';
+const BRUSH_SPACING_STORAGE_KEY = 'pixelart-brush-spacing-v1';
 const SHAPE_SETTINGS_STORAGE_KEY = 'pixelart-shape-settings-v1';
 const FILL_SETTINGS_STORAGE_KEY = 'pixelart-fill-settings-v1';
 const EYEDROPPER_SAMPLE_STORAGE_KEY = 'pixelart-eyedropper-sample-v1';
@@ -118,6 +141,17 @@ function readBrushOpacity() {
   } catch {
     return 100;
   }
+}
+
+function readBrushPressure() {
+  try { return localStorage.getItem(BRUSH_PRESSURE_STORAGE_KEY) === 'true'; } catch { return false; }
+}
+
+function readBrushSpacing() {
+  try {
+    const value = Number.parseInt(localStorage.getItem(BRUSH_SPACING_STORAGE_KEY) || '100', 10);
+    return Number.isFinite(value) ? Math.max(10, Math.min(200, value)) : 100;
+  } catch { return 100; }
 }
 
 function readBrushShape(): BrushShape {
@@ -165,12 +199,15 @@ export default function App() {
   const [frameIndex, setFrameIndex] = useState(0);
   const [tool, setTool] = useState<DrawingTool>('pencil');
   const [toolSettingsOpen, setToolSettingsOpen] = useState(false);
+  const drawingToolsRef = useRef<HTMLDivElement>(null);
   const [focusMode, setFocusMode] = useState(false);
   const { layout, updatePanel, restorePanel, resetLayout, expandToolOptions, activePanel, setActivePanel } = useWorkspaceLayout(setFocusMode);
   const panelProps = (id: keyof typeof layout) => ({ id, state: layout[id], active: activePanel === id, onActivate: setActivePanel, onChange: updatePanel });
   const [brushSize, setBrushSize] = useState(readBrushSize);
   const [brushOpacity, setBrushOpacity] = useState(readBrushOpacity);
   const [brushShape, setBrushShape] = useState<BrushShape>(readBrushShape);
+  const [brushPressure, setBrushPressure] = useState(readBrushPressure);
+  const [brushSpacing, setBrushSpacing] = useState(readBrushSpacing);
   const [shapeSettings, setShapeSettings] = useState(readShapeSettings);
   const [fillSettings, setFillSettings] = useState(readFillSettings);
   const [eyedropperSample, setEyedropperSample] = useState(readEyedropperSample);
@@ -181,9 +218,15 @@ export default function App() {
   const [zoom, setZoom] = useState(window.innerWidth < 600 ? 3 : window.innerHeight < 850 ? 4 : 6);
   const [grid, setGrid] = useState(false);
   const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
+  const [navigatorOpen, setNavigatorOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [canvasDisplay, setCanvasDisplay] = useState<CanvasDisplaySettings>(readCanvasDisplaySettings);
   const [guides, setGuides] = useState(true);
   const [onion, setOnion] = useState(false);
+  const [onionSettingsOpen, setOnionSettingsOpen] = useState(false);
+  const [onionFrameCount, setOnionFrameCount] = useState(1);
+  const [onionOpacity, setOnionOpacity] = useState(25);
+  const [onionColor, setOnionColor] = useState('#218F83');
   const [dirty, setDirty] = useState(false);
   const [drawingStroke, setDrawingStroke] = useState(false);
   const finishingStroke = useRef(false);
@@ -217,6 +260,8 @@ export default function App() {
   const [direction, setDirection] = useState<Direction>('down');
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>('forward');
   const [animationFrameIndex, setAnimationFrameIndex] = useState<number | null>(null);
+  const [selectedFrames, setSelectedFrames] = useState<Set<string>>(new Set());
+  const frameDragIndex = useRef<number | null>(null);
   const [duration, setDuration] = useState(200);
   const layerInput = useRef<HTMLInputElement>(null);
   const layerNameInput = useRef<HTMLInputElement>(null);
@@ -304,6 +349,12 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem(BRUSH_SHAPE_STORAGE_KEY, brushShape); } catch { /* Storage may be unavailable. */ }
   }, [brushShape]);
+  useEffect(() => {
+    try { localStorage.setItem(BRUSH_PRESSURE_STORAGE_KEY, String(brushPressure)); } catch { /* Storage may be unavailable. */ }
+  }, [brushPressure]);
+  useEffect(() => {
+    try { localStorage.setItem(BRUSH_SPACING_STORAGE_KEY, String(brushSpacing)); } catch { /* Storage may be unavailable. */ }
+  }, [brushSpacing]);
 
   useEffect(() => {
     try { localStorage.setItem(SHAPE_SETTINGS_STORAGE_KEY, JSON.stringify(shapeSettings)); } catch { /* Storage may be unavailable. */ }
@@ -584,6 +635,7 @@ export default function App() {
     setAction(recoveredDocument.animations[0]?.action ?? 'idle');
     setDirection(recoveredDocument.animations[0]?.direction ?? 'down');
     setAnimationFrameIndex(null);
+    setSelectedFrames(new Set());
     if (recovered) setNotice({ message: '已恢复未保存草稿；点击“保存”后才会写入正式版本', error: false });
   }
 
@@ -755,14 +807,18 @@ export default function App() {
   }
 
   function patchLayer(id: string, change: Partial<Layer>) {
-    edit(document => Object.assign(document.layers.find(layer => layer.id === id)!, change));
+    edit(document => {
+      const layer = document.layers.find(item => item.id === id);
+      if (!layer || (change.opacity !== undefined && layer.opacityLocked)) return;
+      Object.assign(layer, change);
+    });
   }
 
   function newLayer() {
     if (!draft || draft.layers.length >= 16) return;
     const id = `layer_${crypto.randomUUID().replaceAll('-', '')}`;
     edit(document => {
-      document.layers.push({ id, name: `图层 ${document.layers.length + 1}`, visible: true, locked: false, opacity: 255 });
+      document.layers.push({ id, name: `图层 ${document.layers.length + 1}`, visible: true, locked: false, opacity: 255, blendMode: 'normal', pixelsLocked: false, opacityLocked: false, groupId: null });
       document.frames.forEach(f => { f.pixels[id] = blankImage(f.width, f.height); });
     });
     setSelectedLayer(id);
@@ -792,12 +848,35 @@ export default function App() {
   }
 
   function moveLayer(id: string, offset: number) {
+    const index = latestDraft.current?.layers.findIndex(layer => layer.id === id) ?? -1;
+    const target = latestDraft.current?.layers[index + offset];
+    if (index < 0 || !target) return;
+    reorderLayer(id, target.id, offset > 0);
+  }
+
+  function reorderLayer(id: string, targetId: string, above: boolean) {
+    const source = latestDraft.current;
+    const layer = source?.layers.find(item => item.id === id);
+    if (!source || locked || drawingStroke || !layer || layer.locked || id === targetId || !source.layers.some(item => item.id === targetId)) return;
+    const reordered = source.layers.filter(item => item.id !== id);
+    const target = reordered.findIndex(item => item.id === targetId);
+    reordered.splice(target + (above ? 1 : 0), 0, layer);
+    if (reordered.every((item, index) => item.id === source.layers[index].id)) return;
     edit(document => {
-      const index = document.layers.findIndex(layer => layer.id === id);
-      const next = index + offset;
-      if (next < 0 || next >= document.layers.length || document.layers[index].locked) return;
-      [document.layers[index], document.layers[next]] = [document.layers[next], document.layers[index]];
+      document.layers = reordered;
     });
+  }
+
+  async function mergeLayers(id?: string) {
+    const source = latestDraft.current;
+    if (!source) return;
+    const index = source.layers.findIndex(layer => layer.id === id);
+    const layers = id ? source.layers.slice(Math.max(0, index - 1), index + 1) : source.layers.filter(layer => layer.visible);
+    if (layers.length < 2 || layers.some(layer => layer.locked || !layer.visible)) return;
+    const merged = await mergeLayerPixels(source, layers.map(layer => layer.id));
+    if (latestDraft.current !== source) throw new Error('图层已改变，请重试合并');
+    edit(document => { document.layers = merged.document.layers; document.frames = merged.document.frames; });
+    setSelectedLayer(merged.layerId);
   }
 
   function duplicateFrame(index: number) {
@@ -815,6 +894,15 @@ export default function App() {
     });
     setFrameIndex(index + 1);
     setAnimationFrameIndex(null);
+  }
+
+  function reorderFrame(from: number, to: number) {
+    if (!draft || locked || from === to || from < 0 || to < 0 || from >= draft.frames.length || to >= draft.frames.length) return;
+    edit(document => {
+      const [moved] = document.frames.splice(from, 1);
+      document.frames.splice(to, 0, moved);
+    });
+    setFrameIndex(to);
   }
 
   function createBlankFrame(index: number) {
@@ -847,6 +935,48 @@ export default function App() {
     setAnimationFrameIndex(null);
   }
 
+  function toggleFrameSelection(frameId: string, additive = false) {
+    setSelectedFrames(current => {
+      const next = additive ? new Set(current) : new Set<string>();
+      if (additive && next.has(frameId)) next.delete(frameId); else next.add(frameId);
+      return next;
+    });
+  }
+
+  function deleteSelectedFrames() {
+    if (!draft || locked || selectedFrames.size === 0 || selectedFrames.size >= draft.frames.length) return;
+    const ids = selectedFrames;
+    edit(document => {
+      document.frames = document.frames.filter(frame => !ids.has(frame.id));
+      document.animations = document.animations.map(animation => ({ ...animation, frames: animation.frames.filter(ref => !ids.has(ref.frameId)) })).filter(animation => animation.frames.length > 0);
+    });
+    setFrameIndex(index => Math.min(index, Math.max(0, (draft.frames.length - ids.size) - 1)));
+    setAnimationFrameIndex(null); setSelectedFrames(new Set());
+  }
+
+  function duplicateSelectedFrames() {
+    if (!draft || locked || !selectedFrames.size || draft.frames.length + selectedFrames.size > 64) return;
+    const ids = selectedFrames;
+    const selected = draft.frames.filter(frame => ids.has(frame.id));
+    const copies = selected.map(frame => ({ ...structuredClone(frame), id: `frame_${crypto.randomUUID().replaceAll('-', '')}` }));
+    const lastIndex = Math.max(...selected.map(frame => draft.frames.findIndex(item => item.id === frame.id)));
+    edit(document => {
+      document.frames.splice(lastIndex + 1, 0, ...copies);
+      for (const animation of document.animations) {
+        const additions = new Map(selected.map((frame, index) => [frame.id, copies[index]]));
+        const next: typeof animation.frames = [];
+        for (const ref of animation.frames) { next.push(ref); const copy = additions.get(ref.frameId); if (copy) next.push({ frameId: copy.id, durationMs: ref.durationMs }); }
+        animation.frames = next;
+      }
+    });
+    setSelectedFrames(new Set(copies.map(frame => frame.id)));
+  }
+
+  function applyDurationToSelected() {
+    if (!draft || locked || !Number.isInteger(duration) || duration < 1 || duration > 60000 || selectedFrames.size === 0) return;
+    edit(document => { for (const animation of document.animations) for (const ref of animation.frames) if (selectedFrames.has(ref.frameId)) ref.durationMs = duration; });
+  }
+
   function moveFrame(index: number, offset: number) {
     if (!draft || locked) return;
     const nextIndex = index + offset;
@@ -875,6 +1005,21 @@ export default function App() {
     setFrameIndex(Math.min(frameIndex, next.frames.length - 1));
     if (!next.layers.some(layer => layer.id === selectedLayer)) setSelectedLayer(next.layers.at(-1)!.id);
     setDirty(true); setReport(null); setFinding(null);
+  }
+
+  function restoreEditHistory(index: number) {
+    const current = latestDraft.current;
+    if (!current || index < 0 || index >= undo.length || busy || preview || playing) return;
+    const target = structuredClone(undo[index]);
+    const future = [structuredClone(current), ...undo.slice(index + 1).reverse().map(item => structuredClone(item))];
+    latestDraft.current = target;
+    latestDirty.current = true;
+    setUndo(undo.slice(0, index));
+    setRedo(future);
+    setDraft(target);
+    setDirty(true);
+    setReport(null);
+    setFinding(null);
   }
 
   function importLayer() {
@@ -909,6 +1054,11 @@ export default function App() {
   const currentProject = projects.find(project => project.id === projectId) || null;
   const previewChange = preview?.changes.find(change => change.frameId === frame?.id);
   const activeLayer = draft?.layers.find(layer => layer.id === selectedLayer);
+  const activeLayerIndex = draft?.layers.findIndex(layer => layer.id === selectedLayer) ?? -1;
+  const belowLayer = draft?.layers[activeLayerIndex - 1];
+  const canMergeDown = !!activeLayer?.visible && !activeLayer.locked && !activeLayer.pixelsLocked && !activeLayer.opacityLocked && !!belowLayer?.visible && !belowLayer.locked && !belowLayer.pixelsLocked && !belowLayer.opacityLocked;
+  const visibleLayers = draft?.layers.filter(layer => layer.visible) ?? [];
+  const canMergeVisible = visibleLayers.length > 1 && visibleLayers.every(layer => !layer.locked && !layer.pixelsLocked && !layer.opacityLocked);
   const currentAnimation = draft?.animations.find(a => a.action === action && a.direction === direction);
   const currentRefIndex = animationFrameIndex !== null && currentAnimation?.frames[animationFrameIndex]?.frameId === frame?.id
     ? animationFrameIndex
@@ -920,7 +1070,7 @@ export default function App() {
     : draft?.frames ?? [];
   const onionIndex = currentAnimation && currentRefIndex >= 0 ? currentRefIndex : frameIndex;
   const onionFrames = onion && draft && !playing && !preview
-    ? [onionSequence[onionIndex - 1], onionSequence[onionIndex + 1]].filter((item): item is Frame => Boolean(item))
+    ? Array.from({ length: onionFrameCount }, (_, offset) => [onionIndex - offset - 1, onionIndex + offset + 1]).flat().map(index => onionSequence[index]).filter((item): item is Frame => Boolean(item))
     : [];
   const validDuration = Number.isInteger(duration) && duration >= 1 && duration <= 60000;
   useEffect(() => {
@@ -1057,16 +1207,16 @@ export default function App() {
       if (name.startsWith('tool:')) {
         if (textEditing) return;
         const next = name.slice(5) as DrawingTool;
-        if (['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'select', 'pan', 'move-layer'].includes(next)) {
+        if (['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse', 'select', 'lasso', 'color-select', 'magic-wand', 'pan', 'move-layer'].includes(next)) {
           selectTool(next);
         }
       }
     };
     window.addEventListener('pixelart-command', command);
     return () => window.removeEventListener('pixelart-command', command);
-  }, [locked, projectId, draft, asset, frameIndex, selectedLayer, undo, redo, selection]);
+  }, [locked, projectId, draft, asset, frameIndex, selectedLayer, undo, redo, selection, tool]);
   useEffect(() => {
-    const shortcuts: Record<string, DrawingTool> = { b: 'pencil', e: 'eraser', i: 'eyedropper', g: 'fill', l: 'line', r: 'rectangle', o: 'ellipse', m: 'select', h: 'pan', v: 'move-layer' };
+    const shortcuts: Record<string, DrawingTool> = { b: 'pencil', e: 'eraser', i: 'eyedropper', g: 'fill', l: 'line', r: 'rectangle', o: 'ellipse', m: 'select', q: 'lasso', h: 'pan', v: 'move-layer' };
     const handler = (event: KeyboardEvent) => {
       if (isTextEditingTarget(event.target)) return;
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
@@ -1165,6 +1315,7 @@ export default function App() {
     { label: '椭圆', icon: Circle, disabled: locked, action: () => selectTool('ellipse') },
     { label: '矩形选区', icon: SquareDashedMousePointer, disabled: locked, action: () => selectTool('select') },
     { label: '复制选区', icon: Copy, disabled: !selection, action: () => canvasEditorRef.current?.copySelection() },
+    { label: '合并复制选区', icon: CopyPlus, disabled: !selection, action: () => canvasEditorRef.current?.copyMergedSelection() },
     { label: '剪切选区', icon: Scissors, disabled: locked || !selection, action: () => canvasEditorRef.current?.cutSelection() },
     { label: '粘贴选区', icon: ClipboardPaste, disabled: locked || !selectionClipboard, action: () => canvasEditorRef.current?.pasteSelection() },
     { label: '删除选区', icon: Trash2, danger: true, disabled: locked || !selection, action: () => canvasEditorRef.current?.deleteSelection() },
@@ -1188,6 +1339,8 @@ export default function App() {
     { label: menuLayer.locked ? '解锁图层' : '锁定图层', icon: menuLayer.locked ? Unlock : Lock, disabled: locked, action: () => patchLayer(menuLayer.id, { locked: !menuLayer.locked }) },
     null, { label: '上移图层', icon: ArrowUp, disabled: locked || menuLayer.locked || menuLayerIndex === draft.layers.length - 1, action: () => moveLayer(menuLayer.id, 1) },
     { label: '下移图层', icon: ArrowDown, disabled: locked || menuLayer.locked || menuLayerIndex === 0, action: () => moveLayer(menuLayer.id, -1) },
+    { label: '向下合并图层', icon: Layers2, disabled: locked || drawingStroke || menuLayer.locked || !menuLayer.visible || menuLayerIndex <= 0 || !draft.layers[menuLayerIndex - 1].visible || draft.layers[menuLayerIndex - 1].locked, action: () => run(() => mergeLayers(menuLayer.id), '已合并全部帧的图层，可撤销') },
+    { label: '合并可见图层', icon: Layers, disabled: locked || drawingStroke || !canMergeVisible, action: () => run(() => mergeLayers(), '已合并全部帧的可见图层，可撤销') },
     null, { label: '新建图层', icon: Plus, disabled: locked || draft.layers.length >= 16, action: newLayer },
     { label: '导入 PNG 为新图层', icon: ImagePlus, disabled: locked || draft.layers.length >= 16, action: importLayer },
     { label: '删除图层', icon: Trash2, danger: true, disabled: locked || menuLayer.locked || draft.layers.length <= 1, action: () => deleteLayer(menuLayer.id) },
@@ -1258,9 +1411,16 @@ export default function App() {
       }, '旧版草稿已另存为独立素材')}><CopyPlus size={16} />另存副本</button><IconButton icon={X} label="暂不恢复旧版草稿" onClick={() => setConflictingDraft(null)} /></div> : null}
       {draft && frame ? <>
         <WorkspacePanel {...panelProps('tools')} className="tool-options">
-          <div className="tool-group drawing-tools" role="toolbar" aria-label="绘图工具"><IconButton icon={Pencil} label="铅笔 (B)" active={tool === 'pencil'} disabled={locked} onClick={() => { selectTool('pencil'); }} /><IconButton icon={Eraser} label="橡皮 (E)" active={tool === 'eraser'} disabled={locked} onClick={() => { selectTool('eraser'); }} /><IconButton icon={Pipette} label="取色器 (I)" active={tool === 'eyedropper'} disabled={locked} onClick={() => { selectTool('eyedropper'); }} /><IconButton icon={PaintBucket} label="填充 (G)" active={tool === 'fill'} disabled={locked} onClick={() => { selectTool('fill'); }} /><IconButton icon={Minus} label="直线 (L)" active={tool === 'line'} disabled={locked} onClick={() => { selectTool('line'); }} /><IconButton icon={Square} label="矩形 (R)" active={tool === 'rectangle'} disabled={locked} onClick={() => { selectTool('rectangle'); }} /><IconButton icon={Circle} label="椭圆 (O)" active={tool === 'ellipse'} disabled={locked} onClick={() => { selectTool('ellipse'); }} /><IconButton icon={SquareDashedMousePointer} label="矩形选区 (M)" active={tool === 'select'} disabled={locked} onClick={() => { selectTool('select'); }} /><IconButton icon={Hand} label="移动画布 (H)" active={tool === 'pan'} disabled={locked} onClick={() => { selectTool('pan'); }} /><IconButton icon={Move} label="移动图层 (V)" active={tool === 'move-layer'} disabled={locked} onClick={() => { selectTool('move-layer'); }} /></div>
-          <div className={`active-tool-options ${toolSettingsOpen ? 'is-open' : 'is-closed'}`} role="group" aria-label="当前工具选项" hidden={!toolSettingsOpen}>
-            {tool === 'pencil' ? <div className="tool-settings-panel" aria-label="画笔工具设置"><strong>铅笔设置</strong><label className="brush-size-control"><span>粗细</span><input aria-label="画笔粗细" type="range" min="1" max="16" step="1" value={brushSize} disabled={locked} onChange={event => setBrushSize(Number(event.target.value))} /><output>{brushSize} px</output></label><label className="brush-opacity-control"><span>不透明度</span><input aria-label="画笔不透明度" type="range" min="1" max="100" step="1" value={brushOpacity} disabled={locked} onChange={event => setBrushOpacity(Number(event.target.value))} /><output>{brushOpacity}%</output></label><label className="brush-shape-control"><span>形状</span><select aria-label="画笔形状" value={brushShape} disabled={locked} onChange={event => setBrushShape(event.target.value as BrushShape)}><option value="square">方形</option><option value="circle">圆形</option></select></label></div> : null}
+          <div ref={drawingToolsRef} className="tool-group drawing-tools" role="toolbar" aria-label="绘图工具">
+            {drawingTools.map(({ value, label, icon: Icon }) => <button key={value} type="button"
+              className={`icon-button ${tool === value ? 'active' : ''}`} title={label} aria-label={label}
+              aria-haspopup="dialog" aria-expanded={tool === value && toolSettingsOpen && !locked && !focusMode}
+              disabled={locked} onClick={() => selectTool(value)}><Icon size={17} /></button>)}
+          </div>
+          <ToolSettingsPopover key={tool} title={`${drawingTools.find(item => item.value === tool)!.label.replace(/ \(.*\)$/, '')}设置`}
+            anchorRef={drawingToolsRef} open={toolSettingsOpen && layout.tools.visibility === 'visible' && !layout.tools.minimized && !focusMode && !locked}
+            onClose={() => setToolSettingsOpen(false)}>
+            {tool === 'pencil' ? <div className="tool-settings-panel" aria-label="画笔工具设置"><strong>铅笔设置</strong><BrushPreview size={brushSize} spacing={brushSpacing} opacity={brushOpacity} shape={brushShape} color={colorRef.current} colorOpacity={colorOpacity} /><label className="brush-size-control"><span>粗细</span><input aria-label="画笔粗细" type="range" min="1" max="16" step="1" value={brushSize} disabled={locked} onChange={event => setBrushSize(Number(event.target.value))} /><output>{brushSize} px</output></label><label className="brush-opacity-control"><span>不透明度</span><input aria-label="画笔不透明度" type="range" min="1" max="100" step="1" value={brushOpacity} disabled={locked} onChange={event => setBrushOpacity(Number(event.target.value))} /><output>{brushOpacity}%</output></label><label className="brush-shape-control"><span>形状</span><select aria-label="画笔形状" value={brushShape} disabled={locked} onChange={event => setBrushShape(event.target.value as BrushShape)}><option value="square">方形</option><option value="circle">圆形</option></select></label><label className="checkbox-row"><input type="checkbox" aria-label="启用笔压" checked={brushPressure} disabled={locked} onChange={event => setBrushPressure(event.target.checked)} />启用笔压</label><label className="brush-size-control"><span>间距</span><input aria-label="笔刷间距" type="range" min="10" max="200" step="5" value={brushSpacing} disabled={locked} onChange={event => setBrushSpacing(Number(event.target.value))} /><output>{brushSpacing}%</output></label></div> : null}
             {tool === 'eraser' ? <div className="tool-settings-panel" aria-label="橡皮工具设置"><strong>橡皮设置</strong><label className="brush-size-control"><span>粗细</span><input aria-label="橡皮粗细" type="range" min="1" max="16" step="1" value={brushSize} disabled={locked} onChange={event => setBrushSize(Number(event.target.value))} /><output>{brushSize} px</output></label><label className="brush-shape-control"><span>形状</span><select aria-label="橡皮形状" value={brushShape} disabled={locked} onChange={event => setBrushShape(event.target.value as BrushShape)}><option value="square">方形</option><option value="circle">圆形</option></select></label><span className="tool-settings-hint">橡皮始终完全擦除像素</span></div> : null}
             {tool === 'eyedropper' ? <EyedropperToolSettings sample={eyedropperSample} disabled={locked || drawingStroke} onChange={setEyedropperSample} /> : null}
             {tool === 'fill' ? <FillToolSettings settings={fillSettings} disabled={locked || drawingStroke} onChange={setFillSettings} /> : null}
@@ -1271,18 +1431,23 @@ export default function App() {
               <span className="tool-settings-hint">{tool === 'line' ? 'Shift：45° 吸附' : 'Shift：等比例'} · Alt：中心绘制 · Esc：取消</span>
 
             </div> : null}
-            {!['pencil', 'eraser', 'eyedropper', 'fill', 'line', 'rectangle', 'ellipse'].includes(tool) ? <p className="tool-options-empty">当前工具没有可调整的参数</p> : null}
-          </div>
+            {tool === 'select' ? <SelectionToolSettings key={`${selection?.x}:${selection?.y}:${selection?.width}:${selection?.height}`} selection={selection} canvasWidth={frame.width} canvasHeight={frame.height} disabled={locked || drawingStroke || !activeLayer?.visible || !!activeLayer?.locked || !!activeLayer?.pixelsLocked} onTransform={transform => canvasEditorRef.current?.transformSelection(transform)} onResize={(width, height) => canvasEditorRef.current?.resizeSelection(width, height)} onMove={(x, y) => canvasEditorRef.current?.positionSelection(x, y)} /> : null}
+            {['lasso', 'color-select', 'magic-wand'].includes(tool) ? <div className="tool-settings-panel" aria-label="高级选区设置"><strong>{tool === 'lasso' ? '套索选区' : tool === 'color-select' ? '按颜色选择' : '魔棒选择'}</strong><span className="tool-settings-hint">{tool === 'lasso' ? '拖动绘制闭合区域，松开鼠标确认' : tool === 'color-select' ? '点击后选择当前图层中相近颜色的所有像素' : '点击后选择当前图层中相邻的同色区域'}</span></div> : null}
+            {tool === 'pan' || tool === 'move-layer' ? <p className="tool-options-empty">{tool === 'pan' ? '拖动以移动画布，也可按住空格临时移动画布。' : '拖动以移动当前图层，锁定的图层无法移动。'}</p> : null}
+          </ToolSettingsPopover>
         </WorkspacePanel>
         <div ref={stageRef} className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
-          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} onionFrames={onionFrames} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onPickColor={(color, opacity) => { colorRef.current = color; setPickedColor({ color, opacity }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
-          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
+          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushPressure={brushPressure} brushSpacing={brushSpacing} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} onionFrames={onionFrames} onionOpacity={onionOpacity} onionColor={onionColor} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onFrameMetadataChange={metadata => edit(document => { document.frames[frameIndex] = { ...document.frames[frameIndex], ...metadata }; })} onPickColor={(color, opacity) => { colorRef.current = color; setPickedColor({ color, opacity }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
+          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushPressure={brushPressure} brushSpacing={brushSpacing} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
         </div>
         <div className="canvas-toolbar-wrap">
           <div className="canvas-toolbar" aria-label="画布操作">
-            <div className="tool-group selection-tools" role="group" aria-label="编辑操作"><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /></div>
-            <div className="tool-group canvas-view-tools"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><IconButton icon={Settings2} label="画布显示设置" active={displaySettingsOpen} onClick={() => setDisplaySettingsOpen(value => !value)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= MIN_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, -1))} /><CanvasZoomControl zoom={zoom} disabled={drawingStroke} onChange={value => { setZoom(value); locateCanvas(); }} /><IconButton icon={ZoomIn} label="放大" disabled={zoom >= MAX_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, 1))} /><button className="button secondary canvas-locate" type="button" aria-label="适应窗口 (Shift+F)" title="适应窗口 (Shift+F)" disabled={drawingStroke} onClick={() => fitCanvas()}><Maximize size={15} />适应窗口</button><button className="button secondary canvas-locate" type="button" aria-label="填充窗口" title="按受限边精确贴合可绘图区域，完整显示画布" disabled={drawingStroke} onClick={() => fitCanvas('fill')}><ScanLine size={15} />填充窗口</button><button className="button secondary canvas-locate" type="button" aria-label="定位画布 (F)" title="定位画布 (F)" disabled={drawingStroke} onClick={locateCanvas}><Focus size={15} />定位画布</button></div>
+            <div className="tool-group selection-tools" role="group" aria-label="编辑操作"><IconButton icon={Copy} label="复制选区" disabled={!selection} onClick={() => canvasEditorRef.current?.copySelection()} /><IconButton icon={Scissors} label="剪切选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.cutSelection()} /><IconButton icon={ClipboardPaste} label="粘贴选区" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()} /><IconButton icon={Upload} label="粘贴系统图片" disabled={locked} onClick={() => void canvasEditorRef.current?.pasteSystemImage().then(ok => { if (!ok) setNotice({ message: '系统剪贴板中没有可用图片，或浏览器未授予读取权限', error: true }); })} /><IconButton icon={Trash2} label="删除选区" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.deleteSelection()} /><IconButton icon={X} label="取消选区" disabled={!selection} onClick={() => canvasEditorRef.current?.clearSelection()} /><span className="separator" /><IconButton icon={Undo2} label="撤销" disabled={!undo.length || locked} onClick={undoEdit} /><IconButton icon={Redo2} label="重做" disabled={!redo.length || locked} onClick={redoEdit} /><IconButton icon={History} label="编辑历史" active={historyOpen} onClick={() => setHistoryOpen(value => !value)} /></div>
+            <div className="tool-group canvas-view-tools"><IconButton icon={Layers} label="洋葱皮预览" active={onion} disabled={!!preview || playing} onClick={() => setOnion(v => !v)} /><IconButton icon={Settings2} label="洋葱皮设置" active={onionSettingsOpen} disabled={!!preview || playing} onClick={() => setOnionSettingsOpen(v => !v)} /><IconButton icon={Crosshair} label="帧参考线" active={guides} onClick={() => setGuides(v => !v)} /><IconButton icon={Grid2X2} label="像素网格" active={grid} onClick={() => setGrid(v => !v)} /><IconButton icon={Settings2} label="画布显示设置" active={displaySettingsOpen} onClick={() => setDisplaySettingsOpen(value => !value)} /><IconButton icon={ImagePlus} label="画布导航器" active={navigatorOpen} onClick={() => setNavigatorOpen(value => !value)} /><span className="separator" /><IconButton icon={ZoomOut} label="缩小" disabled={zoom <= MIN_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, -1))} /><CanvasZoomControl zoom={zoom} disabled={drawingStroke} onChange={value => { setZoom(value); locateCanvas(); }} /><IconButton icon={ZoomIn} label="放大" disabled={zoom >= MAX_ZOOM || drawingStroke} onClick={() => setZoom(v => stepZoom(v, 1))} /><button className="button secondary canvas-locate" type="button" aria-label="适应窗口 (Shift+F)" title="适应窗口 (Shift+F)" disabled={drawingStroke} onClick={() => fitCanvas()}><Maximize size={15} />适应窗口</button><button className="button secondary canvas-locate" type="button" aria-label="填充窗口" title="按受限边精确贴合可绘图区域，完整显示画布" disabled={drawingStroke} onClick={() => fitCanvas('fill')}><ScanLine size={15} />填充窗口</button><button className="button secondary canvas-locate" type="button" aria-label="定位画布 (F)" title="定位画布 (F)" disabled={drawingStroke} onClick={locateCanvas}><Focus size={15} />定位画布</button></div>
           </div>
+          {historyOpen ? <div className="canvas-display-popover edit-history-popover" role="group" aria-label="编辑历史"><div className="canvas-display-heading"><strong>编辑历史</strong><button type="button" aria-label="关闭编辑历史" onClick={() => setHistoryOpen(false)}>×</button></div><div className="edit-history-list">{undo.length ? undo.map((item, index) => <button type="button" key={`${index}-${item.name}`} onClick={() => restoreEditHistory(index)} disabled={locked || busy || !!preview || playing}>撤销至第 {index + 1} 步</button>) : <span>暂无撤销记录</span>}{redo.length ? <div className="edit-history-divider">可重做 {redo.length} 步</div> : null}</div></div> : null}
+          {navigatorOpen ? <div className="canvas-display-popover navigator-popover" role="group" aria-label="画布导航器"><div className="canvas-display-heading"><strong>画布导航器</strong><button type="button" aria-label="关闭画布导航器" onClick={() => setNavigatorOpen(false)}>×</button></div><Miniature frame={frame} layers={draft.layers} /><button type="button" className="button secondary" onClick={locateCanvas}><Focus size={14} />定位画布</button></div> : null}
+          {onionSettingsOpen ? <div className="canvas-display-popover onion-settings" role="group" aria-label="洋葱皮设置"><div className="canvas-display-heading"><strong>洋葱皮</strong><button type="button" aria-label="关闭洋葱皮设置" onClick={() => setOnionSettingsOpen(false)}>×</button></div><label>前后帧数<input aria-label="洋葱皮帧数" type="range" min="1" max="8" value={onionFrameCount} onChange={event => setOnionFrameCount(Number(event.target.value))} /><output>{onionFrameCount}</output></label><label>透明度<input aria-label="洋葱皮透明度" type="range" min="5" max="100" value={onionOpacity} onChange={event => setOnionOpacity(Number(event.target.value))} /><output>{onionOpacity}%</output></label><label>颜色<input aria-label="洋葱皮颜色" type="color" value={onionColor} onChange={event => setOnionColor(event.target.value.toUpperCase())} /></label></div> : null}
           {displaySettingsOpen ? <div className="canvas-display-popover" role="group" aria-label="画布显示设置">
             <div className="canvas-display-heading"><strong>画布显示</strong><button type="button" aria-label="关闭画布显示设置" onClick={() => setDisplaySettingsOpen(false)}>×</button></div>
             <label>透明背景<select aria-label="透明背景样式" value={canvasDisplay.backgroundStyle} onChange={event => setCanvasDisplay(value => ({ ...value, backgroundStyle: event.target.value as CanvasDisplaySettings['backgroundStyle'] }))}><option value="checker">棋盘格</option><option value="solid">纯色</option></select></label>
@@ -1296,14 +1461,15 @@ export default function App() {
         </div>
         {preview ? <><div className="preview-strip"><span>{preview.changes.reduce((sum, c) => sum + (c.changedPixels || 0), 0)} 像素变化 · 重检 {preview.report.findings.length} 个问题</span><label>帧<select aria-label="修复预览帧" value={frameIndex} disabled={busy} onChange={event => setFrameIndex(Number(event.target.value))}>{draft.frames.map((item, index) => <option key={item.id} value={index}>{index + 1}</option>)}</select></label><button className="button secondary" disabled={busy} onClick={() => setPreview(null)}><X size={15} />放弃</button><button className="button primary" disabled={busy} onClick={() => run(async () => { const next = await api<{ asset: Asset; report: Report }>(`/assets/${asset!.id}/commit`, { previewId: preview.previewId, expectedCurrentVersionId: asset!.currentVersionId }); install(next.asset); setReport(next.report); setTab('quality'); }, '修复已提交，原版本保留')}><Check size={15} />应用修复</button></div>{previewChange ? <RepairSummary change={previewChange} /> : null}</> : null}
         <WorkspacePanel {...panelProps('palette')} className="palette-panel"><DrawingPalette key={projectId} projectId={projectId} colorRef={colorRef} colorOpacityRef={colorOpacityRef} palette={config.palette} pickedColor={pickedColor} onOpacityChange={setColorOpacity} /></WorkspacePanel>
-        <WorkspacePanel {...panelProps('timeline')} className="timeline" actions={<><small>{draft.frames.length} 帧</small><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><IconButton icon={FilePlus2} label="新建空白帧" disabled={locked || draft.frames.length >= 64} onClick={() => createBlankFrame(frameIndex)} /><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /></>}>
-          <><div className="frame-list">{draft.frames.map((f, i) => { const mappingIndex = currentAnimation?.frames.findIndex(ref => ref.frameId === f.id) ?? -1; const mapped = mappingIndex >= 0 ? currentAnimation?.frames[mappingIndex] : undefined; return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''}`} disabled={!!preview || busy} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={() => { setFrameIndex(i); setAnimationFrameIndex(null); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">#{mappingIndex + 1} · {mapped.durationMs} ms</small> : null}</button>; })}</div>
+        <WorkspacePanel {...panelProps('timeline')} className="timeline" actions={<><small>{draft.frames.length} 帧{selectedFrames.size ? ` · 已选 ${selectedFrames.size}` : ''}</small><IconButton icon={playing ? Pause : Play} label={playing ? '暂停' : '播放动画'} disabled={!!preview || busy || (!currentAnimation && !validDuration)} active={playing} onClick={togglePlayback} /><IconButton icon={FilePlus2} label="新建空白帧" disabled={locked || draft.frames.length >= 64} onClick={() => createBlankFrame(frameIndex)} /><IconButton icon={Plus} label="复制当前帧" disabled={locked || draft.frames.length >= 64} onClick={() => duplicateFrame(frameIndex)} /><IconButton icon={CopyPlus} label="复制选中帧" disabled={locked || !selectedFrames.size || draft.frames.length + selectedFrames.size > 64} onClick={duplicateSelectedFrames} /><IconButton icon={Trash2} label="删除当前帧" disabled={locked || draft.frames.length <= 1} onClick={() => deleteFrame(frameIndex)} /><IconButton icon={Trash2} label="删除选中帧" disabled={locked || selectedFrames.size === 0 || selectedFrames.size >= draft.frames.length} onClick={deleteSelectedFrames} /></>}>
+          <><div className="frame-list">{draft.frames.map((f, i) => { const mappingIndex = currentAnimation?.frames.findIndex(ref => ref.frameId === f.id) ?? -1; const mapped = mappingIndex >= 0 ? currentAnimation?.frames[mappingIndex] : undefined; const selectedFrame = selectedFrames.has(f.id); return <button key={f.id} aria-label={`第 ${i + 1} 帧`} aria-pressed={i === frameIndex} className={`frame-item ${i === frameIndex ? 'selected' : ''} ${selectedFrame ? 'multi-selected' : ''}`} disabled={!!preview || busy} draggable={!locked && !preview && !busy} onDragStart={event => { frameDragIndex.current = i; event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(i)); }} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const from = frameDragIndex.current ?? Number(event.dataTransfer.getData('text/plain')); frameDragIndex.current = null; reorderFrame(from, i); }} onDragEnd={() => { frameDragIndex.current = null; }} onContextMenu={event => context(event, { kind: 'frame', frameIndex: i })} onClick={event => { toggleFrameSelection(f.id, event.shiftKey); setFrameIndex(i); setAnimationFrameIndex(null); setPlaying(false); }}><Miniature frame={f} layers={draft.layers} /><span>{String(i + 1).padStart(2, '0')}</span>{mapped ? <small className="frame-duration">#{mappingIndex + 1} · {mapped.durationMs} ms</small> : null}</button>; })}</div>
           <div className="animation-controls">
             <select aria-label="动作" value={action} disabled={busy || !!preview} onChange={e => selectAnimation(e.target.value as typeof action, direction)}><option value="idle">idle</option><option value="walk">walk</option></select>
             <select aria-label="方向" value={direction} disabled={busy || !!preview} onChange={e => selectAnimation(action, e.target.value as Direction)}>{Object.entries(directionNames).map(([value, name]) => <option key={value} value={value}>{name}</option>)}</select>
             <label><input aria-label="帧时长" type="number" min={1} max={60000} step={1} value={duration} disabled={locked} onChange={e => setDuration(Number(e.target.value))} /> ms</label>
             <label className="playback-mode-control">播放方式<select aria-label="播放方式" value={playbackMode} disabled={locked} onChange={e => { setPlaybackMode(e.target.value as PlaybackMode); setPlaying(false); }}><option value="forward">正向</option><option value="reverse">反向</option><option value="pingpong">往返</option></select></label>
             <button className="button secondary" disabled={locked || !validDuration || (!currentRef && (currentAnimation?.frames.length ?? 0) >= 128)} onClick={updateAnimationFrame}>{currentRef ? '更新时长' : '加入动画'}</button>
+            <button className="button secondary" disabled={locked || !validDuration || !selectedFrames.size} onClick={applyDurationToSelected}>批量设时长</button>
             <IconButton icon={CheckCheck} label="加入全部帧" disabled={locked || !validDuration || (currentAnimation?.frames.length ?? 0) >= 128 || draft.frames.every(item => currentAnimation?.frames.some(ref => ref.frameId === item.id))} onClick={addAllAnimationFrames} />
             <IconButton icon={X} label="移除当前帧" disabled={locked || !currentRef} onClick={removeCurrentAnimationFrame} />
             <IconButton icon={ArrowLeft} label="动作帧前移" disabled={locked || currentRefIndex <= 0} onClick={() => moveAnimationFrame(-1)} />
@@ -1325,12 +1491,8 @@ export default function App() {
       <div className="panel-tabs">{(['layers', 'quality', 'versions'] as const).map(t => <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>{t === 'layers' ? <Layers size={15} /> : t === 'quality' ? <ScanLine size={15} /> : <History size={15} />}{t === 'layers' ? '图层' : t === 'quality' ? '质检' : '版本'}</button>)}</div>
       {tab === 'layers' && draft && frame ? <div className="panel-content">
         <div className="section-label"><span>图层 <small>{draft.layers.length} / 16</small></span><div className="inline-tools"><IconButton icon={ImagePlus} label="导入 PNG 图层" disabled={locked || draft.layers.length >= 16} onClick={importLayer} /><IconButton icon={Plus} label="新建图层" disabled={locked || draft.layers.length >= 16} onClick={newLayer} /></div></div>
-        <div className="layer-list">{[...draft.layers].reverse().map(layer => <div key={layer.id} className={`layer-row ${layer.id === selectedLayer ? 'selected' : ''}`} onContextMenu={event => context(event, { kind: 'layer', layerId: layer.id })}>
-          <IconButton icon={layer.visible ? Eye : EyeOff} label={layer.visible ? `隐藏 ${layer.name}` : `显示 ${layer.name}`} disabled={locked} onClick={() => patchLayer(layer.id, { visible: !layer.visible })} />
-          <button className="layer-select" onClick={() => setSelectedLayer(layer.id)}><img src={frame.pixels[layer.id]} alt="" /><span>{layer.name}</span></button>
-          <IconButton icon={layer.locked ? Lock : Unlock} label={layer.locked ? `解锁 ${layer.name}` : `锁定 ${layer.name}`} disabled={locked} onClick={() => patchLayer(layer.id, { locked: !layer.locked })} />
-        </div>)}</div>
-        {activeLayer ? <div className="layer-properties"><label className="field-label">图层名称<input ref={layerNameInput} aria-label="图层名称" value={activeLayer.name} maxLength={80} disabled={locked || activeLayer.locked} onChange={e => patchLayer(activeLayer.id, { name: e.target.value })} /></label><label className="opacity-label"><span>不透明度</span><output>{Math.round(activeLayer.opacity / 255 * 100)}%</output></label><input aria-label="图层不透明度" type="range" min={0} max={255} value={activeLayer.opacity} disabled={locked || activeLayer.locked} onChange={e => patchLayer(activeLayer.id, { opacity: Number(e.target.value) })} /><div className="layer-actions"><IconButton icon={ArrowUp} label="上移图层" disabled={locked || activeLayer.locked || selectedLayer === draft.layers.at(-1)!.id} onClick={() => moveLayer(selectedLayer, 1)} /><IconButton icon={ArrowDown} label="下移图层" disabled={locked || activeLayer.locked || selectedLayer === draft.layers[0].id} onClick={() => moveLayer(selectedLayer, -1)} /><IconButton icon={Trash2} label="删除图层" disabled={locked || activeLayer.locked || draft.layers.length <= 1} onClick={() => deleteLayer(selectedLayer)} /></div></div> : null}
+        <LayerList layers={draft.layers} frame={frame} selectedLayer={selectedLayer} disabled={locked || drawingStroke} onSelect={setSelectedLayer} onPatch={patchLayer} onContext={(event, id) => context(event, { kind: 'layer', layerId: id })} onReorder={reorderLayer} />
+        {activeLayer ? <div className="layer-properties"><label className="field-label">图层名称<input ref={layerNameInput} aria-label="图层名称" value={activeLayer.name} maxLength={80} disabled={locked || activeLayer.locked} onChange={e => patchLayer(activeLayer.id, { name: e.target.value })} /></label><label className="opacity-label"><span>不透明度</span><output>{Math.round(activeLayer.opacity / 255 * 100)}%</output></label><input aria-label="图层不透明度" type="range" min={0} max={255} value={activeLayer.opacity} disabled={locked || activeLayer.locked || activeLayer.opacityLocked} onChange={e => patchLayer(activeLayer.id, { opacity: Number(e.target.value) })} /><label className="field-label">混合模式<select aria-label="图层混合模式" value={activeLayer.blendMode || 'normal'} disabled={locked || activeLayer.locked} onChange={e => patchLayer(activeLayer.id, { blendMode: e.target.value as BlendMode })}><option value="normal">正常</option><option value="multiply">正片叠底</option><option value="screen">滤色</option><option value="overlay">叠加</option><option value="darken">变暗</option><option value="lighten">变亮</option><option value="difference">差值</option><option value="exclusion">排除</option></select></label><label className="checkbox-row"><input type="checkbox" aria-label="像素锁定" checked={activeLayer.pixelsLocked === true} disabled={locked || activeLayer.locked} onChange={e => patchLayer(activeLayer.id, { pixelsLocked: e.target.checked })} />像素锁定</label><label className="checkbox-row"><input type="checkbox" aria-label="不透明度锁定" checked={activeLayer.opacityLocked === true} disabled={locked || activeLayer.locked} onChange={e => patchLayer(activeLayer.id, { opacityLocked: e.target.checked })} />不透明度锁定</label><div className="layer-actions"><IconButton icon={ArrowUp} label="上移图层" disabled={locked || activeLayer.locked || selectedLayer === draft.layers.at(-1)!.id} onClick={() => moveLayer(selectedLayer, 1)} /><IconButton icon={ArrowDown} label="下移图层" disabled={locked || activeLayer.locked || selectedLayer === draft.layers[0].id} onClick={() => moveLayer(selectedLayer, -1)} /><IconButton icon={Layers2} label="向下合并图层" disabled={locked || drawingStroke || !canMergeDown} onClick={() => run(() => mergeLayers(selectedLayer), '已合并全部帧的图层，可撤销')} /><IconButton icon={Layers} label="合并可见图层" disabled={locked || drawingStroke || !canMergeVisible} onClick={() => run(() => mergeLayers(), '已合并全部帧的可见图层，可撤销')} /><IconButton icon={Trash2} label="删除图层" disabled={locked || activeLayer.locked || draft.layers.length <= 1} onClick={() => deleteLayer(selectedLayer)} /></div></div> : null}
         <div className="panel-divider" /><div className="section-label"><span>帧属性</span><Settings2 size={15} /></div><div className="property-grid"><label>宽<input value={frame.width} readOnly /></label><label>高<input value={frame.height} readOnly /></label></div><label className="field-label">基线 Y<input aria-label="帧基线" type="number" min={0} max={frame.height - 1} value={frame.baselineY ?? ''} placeholder="未设置" disabled={locked} onChange={e => edit(document => { document.frames[frameIndex].baselineY = e.target.value === '' ? null : Number(e.target.value); })} /></label><div className="property-grid">{(['x', 'y'] as const).map(axis => <label key={axis}>原点 {axis.toUpperCase()}<input aria-label={`原点 ${axis}`} type="number" min={0} max={(axis === 'x' ? frame.width : frame.height) - 1} value={frame.origin?.[axis] ?? ''} disabled={locked} onChange={e => edit(document => { const f = document.frames[frameIndex]; f.origin = e.target.value === '' ? null : { ...(f.origin || { x: 0, y: 0 }), [axis]: Number(e.target.value) }; })} /></label>)}</div>
         <FrameMetadataEditor frame={frame} locked={locked} onChange={collisionRects => edit(document => { document.frames[frameIndex].collisionRects = collisionRects; })} />
       </div> : null}
@@ -1404,7 +1566,8 @@ function Miniature({ frame, layers }: { frame: Document['frames'][number]; layer
       const context = ref.current?.getContext('2d');
       if (!context) return;
       context.clearRect(0, 0, frame.width, frame.height);
-      for (const { layer, image } of entries) { if (layer.visible) { context.globalAlpha = layer.opacity / 255; context.drawImage(image, 0, 0); } }
+      for (const { layer, image } of entries) { if (layer.visible) { context.globalAlpha = layer.opacity / 255; context.globalCompositeOperation = (layer.blendMode && layer.blendMode !== 'normal' ? layer.blendMode : 'source-over') as GlobalCompositeOperation; context.drawImage(image, 0, 0); } }
+      context.globalCompositeOperation = 'source-over';
       context.globalAlpha = 1;
     }).catch(() => {});
     return () => { cancelled = true; };

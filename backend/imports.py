@@ -18,6 +18,9 @@ class SheetLayout(Model):
     spacingY: int = Field(default=0, ge=0, le=2048)
     rows: int = Field(default=0, ge=0, le=64)
     columns: int = Field(default=0, ge=0, le=64)
+    offsetX: int = Field(default=0, ge=0, le=2048)
+    offsetY: int = Field(default=0, ge=0, le=2048)
+    cropMode: Literal["strict", "clip"] = "strict"
 
 
 class ImportMapping(Model):
@@ -40,7 +43,7 @@ def retain_png(root: Path, data: bytes) -> tuple[Image.Image, str]:
 
 def normalized_layout(image: Image.Image, requested: SheetLayout) -> SheetLayout:
     if not requested.cellWidth and not requested.cellHeight:
-        if any((requested.marginX, requested.marginY, requested.spacingX, requested.spacingY, requested.rows, requested.columns)):
+        if any((requested.marginX, requested.marginY, requested.spacingX, requested.spacingY, requested.rows, requested.columns, requested.offsetX, requested.offsetY)):
             raise ValueError("Sprite Sheet 布局必须设置单帧宽高")
         if image.width > 512 or image.height > 512:
             raise ValueError("单图最大 512×512；更大的 Sheet 请明确单帧尺寸")
@@ -48,18 +51,18 @@ def normalized_layout(image: Image.Image, requested: SheetLayout) -> SheetLayout
     if not requested.cellWidth or not requested.cellHeight:
         raise ValueError("Sprite Sheet 必须同时设置单帧宽高")
 
-    def count(side: int, cell: int, margin: int, spacing: int, requested_count: int, axis: str) -> int:
-        usable = side - 2 * margin
+    def count(side: int, cell: int, margin: int, spacing: int, requested_count: int, offset: int, axis: str) -> int:
+        usable = side - offset - 2 * margin
         if usable < cell:
             raise ValueError(f"{axis}边距过大，剩余区域不足一帧")
         value = requested_count or (usable + spacing) // (cell + spacing)
-        occupied = 2 * margin + value * cell + (value - 1) * spacing
-        if occupied != side:
+        occupied = offset + 2 * margin + value * cell + (value - 1) * spacing
+        if requested.cropMode == "strict" and occupied != side:
             raise ValueError(f"{axis}布局未完整覆盖 PNG：图片 {side}px，布局 {occupied}px，请调整边距、间距或行列数")
         return value
 
-    columns = count(image.width, requested.cellWidth, requested.marginX, requested.spacingX, requested.columns, "水平")
-    rows = count(image.height, requested.cellHeight, requested.marginY, requested.spacingY, requested.rows, "垂直")
+    columns = count(image.width, requested.cellWidth, requested.marginX, requested.spacingX, requested.columns, requested.offsetX, "水平")
+    rows = count(image.height, requested.cellHeight, requested.marginY, requested.spacingY, requested.rows, requested.offsetY, "垂直")
     if rows * columns > 64:
         raise ValueError("单个素材最多 64 帧")
     return requested.model_copy(update={"rows": rows, "columns": columns})
@@ -70,8 +73,11 @@ def sliced_frames(image: Image.Image, layout: SheetLayout) -> list[dict]:
     for row in range(layout.rows):
         for column in range(layout.columns):
             index = len(frames)
-            x = layout.marginX + column * (layout.cellWidth + layout.spacingX)
-            y = layout.marginY + row * (layout.cellHeight + layout.spacingY)
+            x = layout.offsetX + layout.marginX + column * (layout.cellWidth + layout.spacingX)
+            y = layout.offsetY + layout.marginY + row * (layout.cellHeight + layout.spacingY)
+            if x + layout.cellWidth > image.width or y + layout.cellHeight > image.height:
+                if layout.cropMode == "clip": continue
+                raise ValueError("Sprite Sheet 切分区域超出图片边界")
             frames.append({
                 "frameIndex": index,
                 "frameId": f"frame_{index}",
@@ -85,9 +91,13 @@ def sliced_frames(image: Image.Image, layout: SheetLayout) -> list[dict]:
 
 def preview_import(image: Image.Image, requested: SheetLayout, digest: str) -> dict:
     layout = normalized_layout(image, requested)
+    layout_data = layout.model_dump()
+    if layout.offsetX == 0: layout_data.pop("offsetX", None)
+    if layout.offsetY == 0: layout_data.pop("offsetY", None)
+    if layout.cropMode == "strict": layout_data.pop("cropMode", None)
     return {
         "source": {"width": image.width, "height": image.height, "checksum": digest, "originalRef": f"sources/{digest}.png"},
-        "layout": layout.model_dump(),
+        "layout": layout_data,
         "frames": sliced_frames(image, layout),
     }
 

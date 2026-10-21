@@ -73,7 +73,23 @@ def composite(document: Document, frame: Frame) -> Image.Image:
             array = np.array(image)
             array[:, :, 3] = ((array[:, :, 3].astype(np.uint16) * layer.opacity + 127) // 255).astype(np.uint8)
             image = Image.fromarray(array)
-        result = Image.alpha_composite(result, image)
+        if layer.blendMode == "normal":
+            result = Image.alpha_composite(result, image)
+            continue
+        base = np.asarray(result, dtype=np.float32) / 255
+        source = np.asarray(image, dtype=np.float32) / 255
+        cb, cs = base[:, :, :3], source[:, :, :3]
+        if layer.blendMode == "multiply": blended = cb * cs
+        elif layer.blendMode == "screen": blended = 1 - (1 - cb) * (1 - cs)
+        elif layer.blendMode == "overlay": blended = np.where(cb <= .5, 2 * cb * cs, 1 - 2 * (1 - cb) * (1 - cs))
+        elif layer.blendMode == "darken": blended = np.minimum(cb, cs)
+        elif layer.blendMode == "lighten": blended = np.maximum(cb, cs)
+        elif layer.blendMode == "difference": blended = np.abs(cb - cs)
+        else: blended = cb + cs - 2 * cb * cs
+        sa, da = source[:, :, 3:4], base[:, :, 3:4]
+        out_a = sa + da * (1 - sa)
+        out_rgb = np.divide(blended * sa + cb * da * (1 - sa), np.maximum(out_a, 1e-6))
+        result = Image.fromarray(np.uint8(np.clip(np.concatenate([out_rgb, out_a], axis=2) * 255 + .5, 0, 255)), "RGBA")
     return result
 
 

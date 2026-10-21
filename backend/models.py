@@ -24,6 +24,10 @@ class Layer(Model):
     visible: bool = True
     locked: bool = False
     opacity: int = Field(default=255, ge=0, le=255)
+    blendMode: Literal["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference", "exclusion"] = "normal"
+    pixelsLocked: bool = False
+    opacityLocked: bool = False
+    groupId: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]{1,80}$")
 
 
 class Frame(Model):

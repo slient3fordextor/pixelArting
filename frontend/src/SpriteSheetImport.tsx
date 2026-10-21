@@ -3,7 +3,7 @@ import { CheckCheck, ImagePlus, LoaderCircle, ScanLine, Upload } from 'lucide-re
 import type { Asset, Direction } from './types';
 import './SpriteSheetImport.css';
 
-type Layout = { cellWidth: number; cellHeight: number; marginX: number; marginY: number; spacingX: number; spacingY: number; rows: number; columns: number };
+type Layout = { cellWidth: number; cellHeight: number; marginX: number; marginY: number; spacingX: number; spacingY: number; rows: number; columns: number; offsetX: number; offsetY: number; cropMode: 'strict' | 'clip' };
 type Mapping = { frameIndex: number; action: 'idle' | 'walk'; direction: Direction; durationMs: number };
 type ImportFrame = { frameIndex: number; frameId: string; row: number; column: number; rect: { x: number; y: number; width: number; height: number }; image: string };
 export type SpriteSheetPreview = { source: { width: number; height: number; checksum: string; originalRef: string }; layout: Layout; frames: ImportFrame[] };
@@ -15,7 +15,7 @@ export type SpriteSheetImportProps = {
   onBusyChange?: (busy: boolean) => void;
 };
 
-const initialLayout: Layout = { cellWidth: 64, cellHeight: 64, marginX: 0, marginY: 0, spacingX: 0, spacingY: 0, rows: 0, columns: 0 };
+const initialLayout: Layout = { cellWidth: 64, cellHeight: 64, marginX: 0, marginY: 0, spacingX: 0, spacingY: 0, rows: 0, columns: 0, offsetX: 0, offsetY: 0, cropMode: 'strict' };
 const layoutFields: { key: keyof Layout; label: string; min: number; max: number }[] = [
   { key: 'cellWidth', label: '单帧宽度', min: 1, max: 512 },
   { key: 'cellHeight', label: '单帧高度', min: 1, max: 512 },
@@ -25,6 +25,8 @@ const layoutFields: { key: keyof Layout; label: string; min: number; max: number
   { key: 'spacingY', label: '垂直间距', min: 0, max: 2048 },
   { key: 'rows', label: '行数（0 自动）', min: 0, max: 64 },
   { key: 'columns', label: '列数（0 自动）', min: 0, max: 64 },
+  { key: 'offsetX', label: '起始偏移 X', min: 0, max: 2048 },
+  { key: 'offsetY', label: '起始偏移 Y', min: 0, max: 2048 },
 ];
 const directions: [Direction, string][] = [['down', '下'], ['left', '左'], ['right', '右'], ['up', '上']];
 
@@ -180,6 +182,7 @@ export function SpriteSheetImport({ projectId, busy = false, onImport, beforeImp
     <label className="field-label">素材名称<input aria-label="导入素材名称" value={name} maxLength={100} disabled={locked} onChange={event => { setName(event.target.value); setSavedAsset(null); }} /></label>
     <fieldset className="sheet-segmented"><legend>导入模式</legend><label><input type="radio" name="sheet-import-kind" checked={!sheet} disabled={locked} onChange={() => { setSheet(false); invalidatePreview(); }} />单图</label><label><input type="radio" name="sheet-import-kind" checked={sheet} disabled={locked} onChange={() => { setSheet(true); invalidatePreview(); }} />Sprite Sheet</label></fieldset>
     {sheet ? <div className="sheet-layout-grid">{layoutFields.map(field => <label key={field.key}>{field.label}<input aria-label={field.label} type="number" min={field.min} max={field.max} step={1} value={layout[field.key]} disabled={locked} onChange={event => { setLayout(current => ({ ...current, [field.key]: Number(event.target.value) })); invalidatePreview(); }} /></label>)}</div> : null}
+    {sheet ? <label className="field-label">裁剪规则<select aria-label="Sprite Sheet 裁剪规则" value={layout.cropMode} disabled={locked} onChange={event => { setLayout(current => ({ ...current, cropMode: event.target.value as Layout['cropMode'] })); invalidatePreview(); }}><option value="strict">严格覆盖整张图片</option><option value="clip">允许尾部裁剪</option></select></label> : null}
     <button className="button secondary full" type="button" disabled={!file || !projectId || locked} onClick={() => void showPreview()}>{working ? <LoaderCircle size={16} className="sheet-spinner" /> : <ScanLine size={16} />}预览切分</button>
     {error ? <div className="sheet-import-error" role="alert">{error}</div> : null}
     {preview ? <section className="sheet-preview" aria-label="切分预览">

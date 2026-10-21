@@ -118,7 +118,7 @@ test('continuous color selection uses the latest color without editing the docum
   )).toEqual([36, 52, 62, 255]);
 });
 
-test('color picker controls opacity, foreground/background, swapping and transparent paint', async ({ page }) => {
+test('color picker controls opacity and foreground/background while eraser clears pixels', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto('/');
   await expect(page.getByLabel('像素编辑画布')).toHaveAttribute('aria-busy', 'false');
@@ -142,10 +142,19 @@ test('color picker controls opacity, foreground/background, swapping and transpa
   expect(Math.abs(translucent[0] - 33)).toBeLessThanOrEqual(1);
   expect(Math.abs(translucent[1] - 143)).toBeLessThanOrEqual(1);
   expect(Math.abs(translucent[2] - 131)).toBeLessThanOrEqual(1);
+  await page.getByRole('button', { name: '调整颜色' }).click();
   await page.locator('input[type="color"][aria-label="背景色"]').fill('#ff0000');
-  await page.getByRole('button', { name: '使用背景色' }).click();
-  await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#ff0000');
-  await page.getByRole('button', { name: '交换前景色和背景色' }).click();
+  await page.getByRole('button', { name: '调整颜色' }).click();
+  const backgroundPicker = page.getByLabel('调整背景色', { exact: true });
+  await expect(backgroundPicker).toHaveValue('#ff0000');
+  await backgroundPicker.click({ position: { x: 24, y: 20 } });
+  await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#218f83');
+  await expect(opacity).toHaveValue('50');
+  await backgroundPicker.fill('#123456');
+  await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#218f83');
+  await expect(opacity).toHaveValue('50');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('pixelart-background-color-v1'))).toBe('#123456');
+  await backgroundPicker.fill('#ff0000');
   await expect(page.locator('input[type="color"][aria-label="绘图颜色"]')).toHaveValue('#218f83');
   await page.getByRole('button', { name: '调整颜色' }).click();
   await expect(page.getByRole('group', { name: '调整颜色' })).toBeVisible();
@@ -155,8 +164,8 @@ test('color picker controls opacity, foreground/background, swapping and transpa
   await expect(page.locator('.color-hex')).toHaveText('#FF0000');
   await page.getByLabel('色相').fill('120');
   await expect(page.locator('.color-hex')).toHaveText('#00FF00');
-  await page.getByRole('button', { name: '使用透明色' }).click();
-  await expect(opacity).toHaveValue('0');
+  await page.getByRole('button', { name: '橡皮 (E)', exact: true }).click();
+  await expect(opacity).toHaveValue('50');
   await page.mouse.click(point(20, 20).x, point(20, 20).y);
   await expect.poll(() => pixel(20, 20)).toEqual([0, 0, 0, 0]);
   await opacity.fill('100');
@@ -174,18 +183,21 @@ test('first-phase pixel tools draw shapes, fill pixels and expose selection cont
   expect(rect).not.toBeNull();
   const point = (x: number, y: number) => ({ x: rect!.x + rect!.width * x / 64, y: rect!.y + rect!.height * y / 64 });
   await page.getByRole('button', { name: '直线 (L)', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.mouse.move(point(5, 5).x, point(5, 5).y);
   await page.mouse.down();
   await page.mouse.move(point(15, 15).x, point(15, 15).y);
   await page.mouse.up();
   await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => element.getContext('2d')!.getImageData(10, 10, 1, 1).data[3])).toBeGreaterThan(0);
   await page.getByRole('button', { name: '矩形 (R)', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.mouse.move(point(20, 10).x, point(20, 10).y);
   await page.mouse.down();
   await page.mouse.move(point(28, 18).x, point(28, 18).y);
   await page.mouse.up();
   await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => element.getContext('2d')!.getImageData(20, 10, 1, 1).data[3])).toBeGreaterThan(0);
   await page.getByRole('button', { name: '椭圆 (O)', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.mouse.move(point(32, 10).x, point(32, 10).y);
   await page.mouse.down();
   await page.mouse.move(point(44, 22).x, point(44, 22).y);
@@ -195,15 +207,18 @@ test('first-phase pixel tools draw shapes, fill pixels and expose selection cont
     return data[3];
   })).toBeGreaterThan(0);
   await page.getByRole('button', { name: '矩形选区 (M)', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.mouse.move(point(2, 2).x, point(2, 2).y);
   await page.mouse.down();
   await page.mouse.move(point(8, 8).x, point(8, 8).y);
   await page.mouse.up();
   await expect(page.locator('.selection-region')).toBeVisible();
   await page.getByRole('button', { name: '填充 (G)', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.mouse.click(point(4, 4).x, point(4, 4).y);
   await expect.poll(() => canvas.evaluate((element: HTMLCanvasElement) => element.getContext('2d')!.getImageData(4, 4, 1, 1).data[3])).toBeGreaterThan(0);
   await page.getByRole('button', { name: '取色器 (I)', exact: true }).click();
+  await page.keyboard.press('Escape');
   await page.mouse.click(point(4, 4).x, point(4, 4).y);
   await expect(page.locator('.color-hex')).toHaveText('#218F83');
   await expect(page.getByRole('button', { name: '移动画布 (H)', exact: true })).toBeVisible();
@@ -283,13 +298,15 @@ test('keyboard shortcuts switch tools and undo canvas edits', async ({ page }) =
 
   await page.keyboard.press('e');
   await expect(page.getByRole('button', { name: '橡皮 (E)', exact: true })).toHaveClass(/active/);
+  await page.getByText('PixelArting', { exact: true }).click();
   await page.keyboard.press('b');
   await expect(page.getByRole('button', { name: '铅笔 (B)', exact: true })).toHaveClass(/active/);
-  await expect(page.getByLabel('画笔粗细')).toHaveValue('1');
+  await page.keyboard.press('Escape');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('pixelart-brush-size-v1'))).toBe('1');
   await page.keyboard.press(']');
-  await expect(page.getByLabel('画笔粗细')).toHaveValue('2');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('pixelart-brush-size-v1'))).toBe('2');
   await page.keyboard.press('[');
-  await expect(page.getByLabel('画笔粗细')).toHaveValue('1');
+  await expect.poll(() => page.evaluate(() => localStorage.getItem('pixelart-brush-size-v1'))).toBe('1');
 
   const before = await canvas.evaluate((element: HTMLCanvasElement) => Array.from(element.getContext('2d')!.getImageData(2, 2, 1, 1).data));
   await page.mouse.click(point(2, 2).x, point(2, 2).y);

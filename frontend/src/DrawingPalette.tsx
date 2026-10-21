@@ -1,13 +1,36 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RefObject } from 'react';
-import { ArrowLeft, ArrowRight, Plus, SlidersHorizontal, Square, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Download, Plus, SlidersHorizontal, Trash2, Upload } from 'lucide-react';
 import { DEFAULT_SWATCHES, MAX_RECENT_COLORS, MAX_SWATCHES, RECENT_COLORS_KEY, drawingPaletteKey, normalizeColors, readColors } from './paletteSettings';
 import { hexToRgb, hsbToRgb, rgbToHex, rgbToHsb } from './colorPicker';
+import type { Hsb } from './colorPicker';
 
 type PickedColor = { color: string; opacity?: number };
 
+function ColorChannelInput({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  return <input aria-label={label} type="number" min="0" max="255" value={draft ?? value} onChange={event => {
+    const text = event.currentTarget.value;
+    setDraft(text);
+    if (text !== '' && Number.isFinite(event.currentTarget.valueAsNumber)) onChange(event.currentTarget.valueAsNumber);
+  }} onBlur={() => setDraft(null)} onKeyDown={event => {
+    if (event.key === 'Enter') event.currentTarget.blur();
+  }} />;
+}
+
+function colorHsb(color: string, previous: Hsb): Hsb {
+  const next = rgbToHsb(...hexToRgb(color));
+  // RGB cannot represent hue in gray, or hue/saturation in black.
+  // Keep the user's settings so increasing saturation/brightness restores color.
+  if (next.saturation === 0) next.hue = previous.hue;
+  if (next.brightness === 0) next.saturation = previous.saturation;
+  return next;
+}
+
 export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, pickedColor, onOpacityChange }: { projectId: string; colorRef: RefObject<string>; colorOpacityRef: RefObject<number>; palette: string[]; pickedColor?: PickedColor | null; onOpacityChange: (value: number) => void }) {
   const [color, setColor] = useState(colorRef.current.toUpperCase());
+  const [hsb, setHsb] = useState(() => rgbToHsb(...hexToRgb(colorRef.current)));
+  const hsbRef = useRef(hsb);
   const [customSwatches, setCustomSwatches] = useState(() => readColors(drawingPaletteKey(projectId)));
   const [recent, setRecent] = useState(() => (readColors(RECENT_COLORS_KEY) ?? []).slice(0, MAX_RECENT_COLORS));
   const [managing, setManaging] = useState(false);
@@ -18,17 +41,15 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
   });
   const [storageError, setStorageError] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const paletteFileRef = useRef<HTMLInputElement>(null);
   const managerToggleRef = useRef<HTMLButtonElement>(null);
   const updateFrame = useRef<number | null>(null);
   const draggedColor = useRef<string | null>(null);
-  const foregroundRef = useRef(colorRef.current.toUpperCase());
-  const preserveForeground = useRef(false);
   const lastPickedColor = useRef(pickedColor);
   const projectSwatches = normalizeColors(palette);
   const swatches = customSwatches ?? (projectSwatches.length ? projectSwatches : DEFAULT_SWATCHES);
   const selectedIndex = swatches.indexOf(color);
   const [red, green, blue] = hexToRgb(color);
-  const hsb = rgbToHsb(red, green, blue);
 
   const remember = useCallback((next: string) => {
     const normalized = next.toUpperCase();
@@ -58,7 +79,8 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
     if (!pickedColor || pickedColor === lastPickedColor.current) return;
     lastPickedColor.current = pickedColor;
     colorRef.current = pickedColor.color;
-    foregroundRef.current = pickedColor.color.toUpperCase();
+    hsbRef.current = colorHsb(pickedColor.color, hsbRef.current);
+    setHsb(hsbRef.current);
     if (pickedColor.opacity !== undefined) {
       const nextOpacity = Math.max(0, Math.min(100, Math.round(pickedColor.opacity)));
       colorOpacityRef.current = nextOpacity;
@@ -84,42 +106,35 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
   function pick(next: string) {
     // Brush events need the latest color even before the next display frame.
     colorRef.current = next;
-    if (!preserveForeground.current) foregroundRef.current = next.toUpperCase();
-    preserveForeground.current = false;
+    hsbRef.current = colorHsb(next, hsbRef.current);
     if (updateFrame.current !== null) return;
     updateFrame.current = requestAnimationFrame(() => {
       updateFrame.current = null;
       setColor(colorRef.current.toUpperCase());
+      setHsb(hsbRef.current);
     });
   }
 
-  function choose(next: string) {
+  function choose(next: string, nextHsb = colorHsb(next, hsbRef.current)) {
     if (inputRef.current) inputRef.current.value = next;
-    pick(next);
+    // Controlled fields must receive their new value during the input event.
+    // Only the native color picker uses the deferred display path.
+    colorRef.current = next;
+    hsbRef.current = nextHsb;
+    setColor(next.toUpperCase());
+    setHsb(nextHsb);
     remember(next);
   }
 
-  function chooseBackground() {
-    preserveForeground.current = true;
-    choose(background);
-    updateOpacity(100);
-  }
-
-  function swapColors() {
-    const foreground = colorRef.current.toUpperCase();
-    const next = foregroundRef.current;
-    setBackground(foreground);
-    choose(next);
-  }
-
   function updateRgb(channel: 'red' | 'green' | 'blue', value: number) {
-    const rgb: [number, number, number] = [red, green, blue];
+    const rgb = hexToRgb(colorRef.current);
     rgb[channel === 'red' ? 0 : channel === 'green' ? 1 : 2] = Math.max(0, Math.min(255, Math.round(value)));
     choose(rgbToHex(rgb[0], rgb[1], rgb[2]));
   }
 
   function updateHsb(key: 'hue' | 'saturation' | 'brightness', value: number) {
-    choose(rgbToHex(...hsbToRgb({ ...hsb, [key]: value })));
+    const next = { ...hsbRef.current, [key]: value };
+    choose(rgbToHex(...hsbToRgb(next)), next);
   }
 
   function moveSwatch(source: string, target: string) {
@@ -129,6 +144,25 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
     const next = [...swatches];
     next.splice(to, 0, ...next.splice(from, 1));
     setCustomSwatches(next);
+  }
+
+  function exportPalette(format: 'json' | 'gpl') {
+    const colors = swatches.length ? swatches : DEFAULT_SWATCHES;
+    const body = format === 'json' ? JSON.stringify(colors, null, 2) : ['GIMP Palette', 'Name: PixelArting', 'Columns: 8', '#'].concat(colors.map(color => { const [r, g, b] = hexToRgb(color); return `${r.toString().padStart(3)} ${g.toString().padStart(3)} ${b.toString().padStart(3)}\t${color}`; })).join('\n');
+    const blob = new Blob([body], { type: format === 'json' ? 'application/json' : 'text/plain' });
+    const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = `pixelart-palette.${format}`; link.click(); URL.revokeObjectURL(link.href);
+  }
+
+  async function importPalette(file: File) {
+    const text = await file.text();
+    let parsed: unknown;
+    try { parsed = file.name.toLowerCase().endsWith('.json') ? JSON.parse(text) : text.split(/\r?\n/).map(line => {
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)/); if (!match) return null;
+      return rgbToHex(Number(match[1]), Number(match[2]), Number(match[3]));
+    }).filter(Boolean); } catch { setStorageError(true); return; }
+    const colors = normalizeColors(Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string') as string[] : []);
+    if (!colors.length) { setStorageError(true); return; }
+    setCustomSwatches(colors.slice(0, MAX_SWATCHES)); setStorageError(false);
   }
 
   return <section className="drawing-palette" aria-label="绘图调色板" onKeyDown={event => {
@@ -142,15 +176,11 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
         <div className="color-stack" aria-label="前景色和背景色">
           <label className="color-swatch foreground-swatch" title={`前景色 ${color}`} style={{ backgroundColor: color }}>
             <input ref={inputRef} type="color" aria-label="绘图颜色" defaultValue={colorRef.current} onInput={event => pick(event.currentTarget.value)} onBlur={event => remember(event.currentTarget.value)} />
-            <span>前景</span>
           </label>
-          <button className="color-swatch background-swatch" type="button" aria-label="使用背景色" title={`背景色 ${background}`} style={{ backgroundColor: background }} onClick={chooseBackground}><span>背景</span></button>
-          <label className="background-picker" title="设置背景色">
-            <input type="color" aria-label="背景色" value={background} onChange={event => setBackground(event.currentTarget.value.toUpperCase())} />
+          <label className="color-swatch background-swatch" title={`背景色 ${background}`} style={{ backgroundColor: background }}>
+            <input type="color" aria-label="调整背景色" value={background} onChange={event => setBackground(event.currentTarget.value.toUpperCase())} />
           </label>
         </div>
-        <button className="icon-button palette-action" type="button" aria-label="交换前景色和背景色" title="交换前景色和背景色" onClick={swapColors}><ArrowLeft size={13} /><ArrowRight size={13} /></button>
-      <button className="transparent-color" type="button" aria-label="使用透明色" title="透明色" onClick={() => updateOpacity(0)}><span><Square size={14} /><X size={10} /></span></button>
         <button className={`icon-button palette-action color-adjust-button ${advancedOpen ? 'active' : ''}`} type="button" aria-label="调整颜色" title="调整颜色（HSB / RGB）" aria-expanded={advancedOpen} onClick={() => setAdvancedOpen(value => !value)}><SlidersHorizontal size={14} /><span>调整颜色</span></button>
         <label className="compact-opacity"><span>不透明度</span><input aria-label="颜色不透明度" type="range" min="0" max="100" step="1" value={opacity} onChange={event => updateOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
       </div>
@@ -175,7 +205,7 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
       <span className="color-hex">{color}</span>
     </div>
     {advancedOpen && <div className="advanced-color-panel" role="group" aria-label="调整颜色">
-      <div className="advanced-color-heading"><strong>调整颜色</strong><span>HSB / RGB</span></div>
+      <div className="advanced-color-heading"><strong>调整颜色</strong><label className="background-picker">背景色<input type="color" aria-label="背景色" value={background} onChange={event => setBackground(event.currentTarget.value.toUpperCase())} /></label><span>HSB / RGB</span></div>
       <div className="advanced-color-preview" style={{ backgroundColor: color }}><span>{color}</span></div>
       <div className="advanced-color-fields" aria-label="HSB 色彩模式">
         <span className="advanced-color-section-label">HSB：色相、饱和度、明度</span>
@@ -185,9 +215,9 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
       </div>
       <div className="rgb-fields" aria-label="RGB 数值">
         <span className="advanced-color-section-label">RGB：红、绿、蓝通道</span>
-        <label><span>R</span><input aria-label="红色通道" type="number" min="0" max="255" value={red} onChange={event => updateRgb('red', Number(event.target.value))} /></label>
-        <label><span>G</span><input aria-label="绿色通道" type="number" min="0" max="255" value={green} onChange={event => updateRgb('green', Number(event.target.value))} /></label>
-        <label><span>B</span><input aria-label="蓝色通道" type="number" min="0" max="255" value={blue} onChange={event => updateRgb('blue', Number(event.target.value))} /></label>
+        <label><span>R</span><ColorChannelInput label="红色通道" value={red} onChange={value => updateRgb('red', value)} /></label>
+        <label><span>G</span><ColorChannelInput label="绿色通道" value={green} onChange={value => updateRgb('green', value)} /></label>
+        <label><span>B</span><ColorChannelInput label="蓝色通道" value={blue} onChange={value => updateRgb('blue', value)} /></label>
       </div>
     </div>}
     <div className="palette-recent" role="group" aria-label="最近使用颜色">
@@ -202,6 +232,10 @@ export function DrawingPalette({ projectId, colorRef, colorOpacityRef, palette, 
         <button type="button" disabled={selectedIndex < 0} onClick={() => setCustomSwatches(swatches.filter(swatch => swatch !== color))}><Trash2 size={13} />删除当前色块</button>
         <button type="button" disabled={!projectSwatches.length} onClick={() => setCustomSwatches(projectSwatches)}>载入项目色板</button>
         <button type="button" onClick={() => setCustomSwatches([...DEFAULT_SWATCHES])}>恢复默认色板</button>
+        <button type="button" onClick={() => paletteFileRef.current?.click()}><Upload size={13} />导入色板</button>
+        <button type="button" onClick={() => exportPalette('json')}><Download size={13} />导出 JSON</button>
+        <button type="button" onClick={() => exportPalette('gpl')}><Download size={13} />导出 GPL</button>
+        <input ref={paletteFileRef} type="file" accept=".json,.gpl,.txt" hidden onChange={event => { const file = event.target.files?.[0]; if (file) void importPalette(file); event.target.value = ''; }} />
       </div>
     </div>}
     {storageError && <div className="palette-hint" role="status">色板暂未保存，请检查本地存储空间。</div>}

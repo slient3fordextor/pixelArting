@@ -1,4 +1,5 @@
-export type Layer = { id: string; name: string; visible: boolean; locked: boolean; opacity: number };
+export type BlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'darken' | 'lighten' | 'difference' | 'exclusion';
+export type Layer = { id: string; name: string; visible: boolean; locked: boolean; opacity: number; blendMode?: BlendMode; pixelsLocked?: boolean; opacityLocked?: boolean; groupId?: string | null };
 export type ColorSampleSource = 'layer' | 'merged';
 export type Frame = {
   id: string; width: number; height: number; pixels: Record<string, string>;

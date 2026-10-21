@@ -9,6 +9,21 @@ from .images import checksum, validate_images
 from .models import AiConfigUpdate, AiGeneration, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, AiProviderConfig, CheckConfig, Document
 
 
+def _document_api_payload(document: Document) -> dict:
+    """Omit default layer metadata for compatibility with older clients."""
+    payload = document.model_dump()
+    for layer in payload.get("layers", []):
+        if layer.get("blendMode") == "normal":
+            layer.pop("blendMode", None)
+        if layer.get("pixelsLocked") is False:
+            layer.pop("pixelsLocked", None)
+        if layer.get("opacityLocked") is False:
+            layer.pop("opacityLocked", None)
+        if layer.get("groupId") is None:
+            layer.pop("groupId", None)
+    return payload
+
+
 def uid() -> str:
     return uuid.uuid4().hex
 
@@ -610,7 +625,7 @@ class Store:
             if not row:
                 raise KeyError("素材不存在")
             versions = [dict(v) for v in conn.execute("SELECT id,parent,operation,checksum,created FROM versions WHERE asset_id=? ORDER BY created DESC", (asset_id,))]
-        return {"id": asset_id, "projectId": row["project_id"], "name": row["name"], "currentVersionId": row["current_version"], "versions": versions, "document": self.document(asset_id, row["current_version"]).model_dump()}
+        return {"id": asset_id, "projectId": row["project_id"], "name": row["name"], "currentVersionId": row["current_version"], "versions": versions, "document": _document_api_payload(self.document(asset_id, row["current_version"]))}
 
     def document(self, asset_id: str, version_id: str) -> Document:
         with self.connection() as conn:
