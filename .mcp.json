@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "pixelarting": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "backend.mcp_server"],
+      "cwd": "."
+    }
+  }
+}

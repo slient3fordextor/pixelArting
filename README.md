@@ -84,3 +84,7 @@ npx playwright test --config desktop.playwright.config.ts
 
 尚未实现：多用户隔离、原生 Aseprite 格式、JSON 包回导入、复杂混合模式、Sheet 边距/间距、碰撞框交互编辑、引擎插件。Godot 导入验证状态见 [实现状态](docs/implementation-status.md)。
 
+## Agent / MCP 集成
+
+项目提供标准 MCP 服务，默认只读，可被 Codex、Zed、Hermes/Harmes 及其他 MCP 客户端使用。先安装依赖，再将仓库中的 `.mcp.json` 加载到客户端；Codex 也可以执行 `codex mcp add pixelarting -- .venv/bin/python -m backend.mcp_server`。需要 agent 修改素材时，在客户端 MCP 配置中显式设置 `PIXELART_MCP_ALLOW_WRITE=1`。完整工具清单和 Streamable HTTP 配置见 [MCP 文档](docs/mcp.md)。
+
