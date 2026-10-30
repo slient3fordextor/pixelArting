@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import warnings
 
 import numpy as np
@@ -61,6 +62,11 @@ def validate_images(document: Document):
             image = decode_image(value)
             if image.size != (frame.width, frame.height):
                 raise ValueError("图层尺寸必须与所在帧的画布一致")
+        for pixels in frame.layerOverflow.values():
+            for coordinate, color in pixels.items():
+                parts = coordinate.split(",")
+                if len(parts) != 2 or any(not re.fullmatch(r"-?[0-9]{1,5}", part) for part in parts) or not re.fullmatch(r"#[0-9a-fA-F]{8}", color):
+                    raise ValueError("越界像素格式无效")
 
 
 def composite(document: Document, frame: Frame) -> Image.Image:
@@ -97,6 +103,9 @@ def checksum(document: Document) -> str:
     content = document.model_dump()
     content.pop("provenance", None)
     for frame in content["frames"]:
+        # Keep checksums compatible with documents written before overflow support.
+        if not frame["layerOverflow"]:
+            frame.pop("layerOverflow")
         frame["pixels"] = {
             key: hashlib.sha256(decode_image(value).tobytes()).hexdigest()
             for key, value in frame["pixels"].items()

@@ -32,6 +32,7 @@ def rich_asset(client, project=None, name="Layered sprite"):
         name=name, type="character", layers=[Layer(id="base", name="Body"), Layer(id="gear", name="Equipment", visible=False, locked=True, opacity=73)],
         frames=[Frame(id=f"frame_{index}", width=4, height=3,
             pixels={"base": encode_image(Image.new("RGBA", (4, 3), (200, index * 40, 50, 255))), "gear": encode_image(Image.new("RGBA", (4, 3), (50, 100, index * 40, 128)))},
+            layerOverflow={"base": {"-1,2": "#c81432ff"}, "gear": {"4,3": "#32642880"}},
             origin=Point(x=1, y=2), baselineY=2, collisionRects=[Rect(x=1, y=0, width=2, height=3)]) for index in range(2)],
         animations=[Animation(action="idle", direction="down", frames=[FrameRef(frameId="frame_1", durationMs=350), FrameRef(frameId="frame_0", durationMs=100), FrameRef(frameId="frame_1", durationMs=500)], loop=False)],
         provenance={"kind": "original", "licenseStatus": "original"},

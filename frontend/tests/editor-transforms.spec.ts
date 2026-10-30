@@ -161,15 +161,44 @@ test('real layer dragging reorders the shared stack, supports undo and saves', a
   expect(saved.document.layers.map((layer: { id: string }) => layer.id)).toEqual(['top', 'base']);
 });
 
+test('duplicate, clear and delete layers keep overflow independent and saveable', async ({ page, request }) => {
+  const { project, asset } = await fixture(page, request);
+  asset.document.frames[0].layerOverflow = { base: { '-1,2': '#ff0000ff' } };
+  await openDocument(page, request, project.id, asset, asset.document);
+  await expect(page.locator('.overflow-pixel')).toHaveCount(1);
+  await page.locator('.layer-row').first().click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '复制图层', exact: true }).click();
+  await expect(page.locator('.overflow-pixel')).toHaveCount(2);
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('.toast')).toContainText('版本已保存');
+  let saved = await (await request.get(`/api/assets/${asset.id}`)).json();
+  const copyId = saved.document.layers[1].id;
+  expect(saved.document.frames[0].layerOverflow).toEqual({ base: { '-1,2': '#ff0000ff' }, [copyId]: { '-1,2': '#ff0000ff' } });
+  page.on('dialog', dialog => dialog.accept());
+  await page.getByLabel('像素编辑画布').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '清空当前图层', exact: true }).click();
+  await expect(page.locator('.overflow-pixel')).toHaveCount(1);
+  await page.getByRole('button', { name: '撤销', exact: true }).click();
+  await expect(page.locator('.overflow-pixel')).toHaveCount(2);
+  await page.getByRole('button', { name: '删除图层', exact: true }).click();
+  await expect(page.locator('.layer-row')).toHaveCount(1);
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('.toast')).toContainText('版本已保存');
+  saved = await (await request.get(`/api/assets/${asset.id}`)).json();
+  expect(saved.document.frames[0].layerOverflow).toEqual({ base: { '-1,2': '#ff0000ff' } });
+});
+
 test('merge down preserves opacity and all animation frames and can undo atomically', async ({ page, request }) => {
   const { project, asset, images } = await fixture(page, request);
   asset.document.layers[0].opacity = 128;
   asset.document.layers.push({ id: 'top', name: '蓝色层', opacity: 128, visible: true, locked: false });
   asset.document.frames[0].pixels = { base: images.red, top: images.blue };
+  asset.document.frames[0].layerOverflow = { base: { '-1,2': '#ff0000ff', '17,3': '#ff0000ff' }, top: { '-1,2': '#0000ffff' } };
   asset.document.frames.push({ ...structuredClone(asset.document.frames[0]), id: 'second', pixels: { base: images.blue, top: images.red } });
   asset.document.animations = [{ action: 'walk', direction: 'down', loop: true, frames: [{ frameId: asset.document.frames[0].id, durationMs: 100 }, { frameId: 'second', durationMs: 300 }] }];
   await openDocument(page, request, project.id, asset, asset.document);
   const first = await snapshot(page);
+  const blendedOverflow = `#${(await pixel(page, 2, 2)).map(value => value.toString(16).padStart(2, '0')).join('')}`;
   await page.getByRole('button', { name: '第 2 帧', exact: true }).click();
   await expect(page.getByLabel('像素编辑画布')).toHaveAttribute('aria-busy', 'false');
   const second = await snapshot(page);
@@ -187,6 +216,10 @@ test('merge down preserves opacity and all animation frames and can undo atomica
   await expect(page.locator('.toast')).toContainText('版本已保存');
   const saved = await (await request.get(`/api/assets/${asset.id}`)).json();
   expect(saved.document.frames.map((frame: { pixels: object }) => Object.keys(frame.pixels))).toEqual([['base'], ['base']]);
+  expect(saved.document.frames.map((frame: { layerOverflow: object }) => frame.layerOverflow)).toEqual([
+    { base: { '-1,2': blendedOverflow, '17,3': '#ff000080' } },
+    { base: { '-1,2': blendedOverflow, '17,3': '#ff000080' } },
+  ]);
   expect(saved.document.animations).toEqual(asset.document.animations);
 });
 

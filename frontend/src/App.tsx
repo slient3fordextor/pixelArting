@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import {
   ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronRight, ClipboardPaste, Copy, CopyPlus, Download, Eraser, Eye, EyeOff,
-  FilePlus2, Folder, Grid2X2, Hand, History, ImagePlus, Layers, Layers2, Lock, Minus, Move, PaintBucket, Pause, Pencil, Pipette, Play, Plus, Redo2,
+  FilePlus2, Folder, Grid2X2, Hand, History, ImagePlus, Layers, Layers2, Library, Lock, Minus, Move, PaintBucket, Pause, Pencil, Pipette, Play, Plus, Redo2,
   Circle, Crosshair, Focus, Maximize, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Scissors, Square, SquareDashedMousePointer,
   RefreshCw, Save, ScanLine, Settings2, Trash2, Undo2, Unlock, Upload, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
@@ -20,6 +20,7 @@ import { LayerList } from './LayerList';
 import { mergeLayerPixels } from './layerPixels';
 import { WorkspacePanel } from './WorkspacePanel';
 import { WorkspaceWindowMenu } from './WorkspaceWindowMenu';
+import { ApplicationMenuBar } from './ApplicationMenuBar';
 import { useWorkspaceLayout } from './workspaceLayout';
 import { normalizeFillSettings } from './drawingFill';
 import type { BrushShape, CanvasEditorHandle, DrawingTool, Rect } from './CanvasEditor';
@@ -36,9 +37,10 @@ import { ExchangeControls } from './ExchangeControls';
 import { ProjectControls } from './ProjectControls';
 import { AIControls } from './AIControls';
 import { ContextMenu } from './ContextMenu';
+import { AssetLibraryDialog } from './AssetLibraryDialog';
 import type { MenuItem } from './ContextMenu';
 import { defaultConfig, RULE_NAMES } from './types';
-import type { Asset, AssetItem, BlendMode, CheckConfig, ColorSampleSource, Direction, Document, Finding, Frame, Layer, Preview, Project, Report } from './types';
+import type { Asset, AssetItem, BlendMode, CheckConfig, ColorSampleSource, Direction, Document, Finding, Frame, Layer, LibraryAsset, Preview, Project, Report } from './types';
 
 function IconButton({ icon: Icon, label, onClick, disabled = false, active = false, ariaExpanded }: { icon: LucideIcon; label: string; onClick: () => void; disabled?: boolean; active?: boolean; ariaExpanded?: boolean }) {
   return <button className={`icon-button ${active ? 'active' : ''}`} type="button" title={label} aria-label={label} aria-expanded={ariaExpanded} onClick={onClick} disabled={disabled}><Icon size={17} /></button>;
@@ -193,6 +195,11 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
   const [assets, setAssets] = useState<AssetItem[]>([]);
+  const [libraryAssets, setLibraryAssets] = useState<LibraryAsset[]>([]);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [collectingAsset, setCollectingAsset] = useState<AssetItem | null>(null);
+  const [renamingAssetId, setRenamingAssetId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
   const [asset, setAsset] = useState<Asset | null>(null);
   const [draft, setDraft] = useState<Document | null>(null);
   const [selectedLayer, setSelectedLayer] = useState('');
@@ -246,7 +253,8 @@ export default function App() {
   const [notice, setNotice] = useState<{ message: string; error: boolean } | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [paletteText, setPaletteText] = useState(config.palette.join(', '));
-  const [dialog, setDialog] = useState<'project' | 'upload' | 'asset' | null>(null);
+  const [dialog, setDialog] = useState<'project' | 'projects' | 'upload' | 'asset' | null>(null);
+  const [projectSettingsRequest, setProjectSettingsRequest] = useState(0);
   const [projectName, setProjectName] = useState('');
   const [assetName, setAssetName] = useState('未命名素材');
   const [assetWidth, setAssetWidth] = useState(64);
@@ -254,8 +262,6 @@ export default function App() {
   const [menu, setMenu] = useState<{ x: number; y: number; kind: 'canvas' | 'layer' | 'frame' | 'library' | 'asset'; layerId?: string; frameIndex?: number; assetId?: string } | null>(null);
   const assetClipboard = useRef<{ document: Document; sourceAssetId?: string; versionId?: string } | null>(null);
   const [playing, setPlaying] = useState(false);
-  const [renamingAssetId, setRenamingAssetId] = useState<string | null>(null);
-  const [renameValue, setRenameValue] = useState('');
   const [action, setAction] = useState<'idle' | 'walk'>('idle');
   const [direction, setDirection] = useState<Direction>('down');
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>('forward');
@@ -639,8 +645,8 @@ export default function App() {
     if (recovered) setNotice({ message: '已恢复未保存草稿；点击“保存”后才会写入正式版本', error: false });
   }
 
-  async function switchProject(id: string) {
-    if (!await confirmDiscardCurrentDraft()) return;
+  async function switchProject(id: string, confirmed = false) {
+    if (!confirmed && !await confirmDiscardCurrentDraft()) return;
     const sequence = ++loadSequence.current;
     const [list, projectConfig] = await Promise.all([
       api<AssetItem[]>(`/projects/${id}/assets`),
@@ -662,6 +668,60 @@ export default function App() {
     const sequence = ++loadSequence.current;
     const next = await api<Asset>(`/assets/${id}`);
     if (sequence === loadSequence.current) install(next);
+  }
+
+  async function refreshLibrary() {
+    setLibraryAssets(await api<LibraryAsset[]>('/assets/library'));
+  }
+
+  async function openAssetLibrary() {
+    await refreshLibrary();
+    setLibraryOpen(true);
+  }
+
+  async function useLibraryAsset(item: LibraryAsset) {
+    if (!projectId) return;
+    const next = await api<Asset>(`/projects/${projectId}/library/${item.id}/use`, {});
+    setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
+    setLibraryOpen(false);
+    if (!dirty) install(next);
+    setNotice({ message: dirty ? `已添加「${next.name}」到左侧，当前草稿未改变` : `已将「${next.name}」添加到当前项目`, error: false });
+  }
+
+  async function removeLibraryAsset(item: LibraryAsset) {
+    await api(`/library/${item.id}`, { expectedCurrentVersionId: item.versionId }, 'DELETE');
+    await refreshLibrary();
+    setNotice({ message: '已移出素材库，项目中的素材不受影响', error: false });
+  }
+
+  async function collectAsset() {
+    const item = collectingAsset;
+    if (!item) return;
+    if (item.id === latestAsset.current?.id && latestDirty.current) throw new Error('请先保存当前素材，再确认加入素材库');
+    const current = await api<Asset>(`/assets/${item.id}`);
+    if (current.currentVersionId !== item.currentVersionId) throw new Error('素材版本已变化，请刷新后重新确认收录');
+    await api(`/assets/${item.id}/library`, { expectedCurrentVersionId: current.currentVersionId });
+    setCollectingAsset(null);
+    setNotice({ message: `已将「${item.name}」的当前保存版本加入素材库`, error: false });
+  }
+
+  function beginRename(item: AssetItem) {
+    setRenamingAssetId(item.id); setRenameValue(item.id === asset?.id ? draft?.name || item.name : item.name);
+  }
+
+  function finishRename(item: AssetItem) {
+    setRenamingAssetId(null);
+    const name = renameValue.trim();
+    if (!name || name === item.name) return;
+    if (item.id === asset?.id && dirty) {
+      edit(document => { document.name = name; });
+      return;
+    }
+    void run(async () => {
+      const next = await api<Asset>(`/assets/${item.id}/rename`, { expectedCurrentVersionId: item.currentVersionId, name });
+      if (item.id === asset?.id) install(next);
+      setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
+    }, '素材已重命名');
   }
 
   async function snapshotFor(item: AssetItem) {
@@ -693,43 +753,6 @@ export default function App() {
     setMenu(null);
     if (!dirty) install(next);
     setNotice({ message: dirty ? `已创建副本「${next.name}」，当前草稿未改变` : `已创建副本「${next.name}」`, error: false });
-  }
-
-  const renameCancel = useRef(false);
-
-  function beginRename(item: AssetItem) {
-    if (locked) return;
-    renameCancel.current = false;
-    setRenamingAssetId(item.id);
-    setRenameValue(item.name);
-    setMenu(null);
-  }
-
-  function renameAsset(item: AssetItem, requestedName?: string) {
-    const name = requestedName?.trim();
-    if (!name || name === item.name) return;
-    if (item.id === asset?.id && dirty && draft) {
-      edit(document => { document.name = name.slice(0, 100); });
-      setNotice({ message: '名称已修改，保存后写入版本', error: false });
-      return;
-    }
-    run(async () => {
-      const next = await api<Asset>(`/assets/${item.id}/rename`, { expectedCurrentVersionId: item.currentVersionId, name });
-      if (item.id === asset?.id) install(next);
-      setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
-    }, '素材已重命名');
-  }
-
-  function finishInlineRename(item: AssetItem) {
-    if (renamingAssetId !== item.id || renameCancel.current) return;
-    setRenamingAssetId(null);
-    renameAsset(item, renameValue);
-  }
-
-  async function refreshAssets() {
-    if (!projectId) return;
-    setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`));
-    setMenu(null);
   }
 
   async function exportAsset(item: AssetItem, target: 'png' | 'frames' | 'sheet' | 'json' | 'godot', frameId?: string) {
@@ -832,7 +855,10 @@ export default function App() {
       const index = document.layers.findIndex(layer => layer.id === id);
       const layer = document.layers[index];
       document.layers.splice(index + 1, 0, { ...layer, id: copyId, name: `${layer.name.slice(0, 75)} 副本`, locked: false });
-      document.frames.forEach(f => { f.pixels[copyId] = f.pixels[id]; });
+      document.frames.forEach(f => {
+        f.pixels[copyId] = f.pixels[id];
+        if (f.layerOverflow?.[id]) f.layerOverflow[copyId] = structuredClone(f.layerOverflow[id]);
+      });
     });
     setSelectedLayer(copyId);
   }
@@ -842,7 +868,7 @@ export default function App() {
     if (!draft || !layer || layer.locked || draft.layers.length <= 1 || !window.confirm(`删除「${layer.name}」及其所有帧图像？`)) return;
     edit(document => {
       document.layers = document.layers.filter(l => l.id !== id);
-      document.frames.forEach(f => delete f.pixels[id]);
+      document.frames.forEach(f => { delete f.pixels[id]; if (f.layerOverflow) delete f.layerOverflow[id]; });
     });
     if (selectedLayer === id) setSelectedLayer(draft.layers.filter(l => l.id !== id).at(-1)!.id);
   }
@@ -1193,6 +1219,10 @@ export default function App() {
         return;
       }
       if (locked) return;
+      if (name === 'new-project') setDialog('project');
+      if (name === 'project-switcher') setDialog('projects');
+      if (name === 'project-settings' && projectId) setProjectSettingsRequest(value => value + 1);
+      if (name === 'asset-library' && projectId) run(openAssetLibrary);
       if (name === 'new-asset' && projectId) setDialog('asset');
       if (name === 'open' && projectId) openUpload();
       if (name === 'save' && draft) run(saveDraft, '版本已保存');
@@ -1228,14 +1258,15 @@ export default function App() {
           void run(saveDraft, '版本已保存');
           return;
         }
-        if (command === 'n' && !locked && projectId) {
+        if (command === 'n' && !locked && (event.shiftKey || projectId)) {
           event.preventDefault();
-          setDialog('asset');
+          setDialog(event.shiftKey ? 'project' : 'asset');
           return;
         }
         if (command === 'o' && !locked && projectId) {
           event.preventDefault();
-          openUpload();
+          if (event.shiftKey) void run(openAssetLibrary);
+          else openUpload();
           return;
         }
         if ((command === 'z' || command === 'y') && !locked) {
@@ -1275,7 +1306,7 @@ export default function App() {
   useEffect(() => {
     const toggleFocus = (event: KeyboardEvent) => {
       if (event.key !== 'Tab' || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (isTextEditingTarget(event.target) || (event.target instanceof Element && event.target.closest('.workspace-panel, .workspace-window-menu')) || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      if (isTextEditingTarget(event.target) || (event.target instanceof Element && event.target.closest('.workspace-panel, .workspace-window-menu, .app-menu-bar')) || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
       event.preventDefault();
       setFocusMode(value => !value);
     };
@@ -1284,17 +1315,18 @@ export default function App() {
   }, []);
   let menuItems: MenuItem[] = [];
   if (menu?.kind === 'library') menuItems = [
+    { label: '打开素材库', icon: Library, disabled: locked || !projectId, action: () => run(openAssetLibrary) },
     { label: '新建素材', icon: FilePlus2, disabled: locked || !projectId, action: () => setDialog('asset') },
     { label: '导入 PNG / Sprite Sheet', icon: Upload, disabled: locked || !projectId, action: openUpload },
     { label: '粘贴素材', icon: ClipboardPaste, disabled: locked || !projectId || !assetClipboard.current, action: () => run(pasteAsset) },
-    null, { label: '刷新素材列表', icon: RefreshCw, disabled: locked || !projectId, action: () => run(refreshAssets) },
-    null, { label: '新建项目', icon: Folder, disabled: locked, action: () => setDialog('project') },
+    null, { label: '刷新项目素材', icon: RefreshCw, disabled: locked || !projectId, action: () => run(async () => setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`))) },
   ];
   if (menu?.kind === 'asset') {
     const item = assets.find(value => value.id === menu.assetId);
     if (item) menuItems = [
       { label: '打开编辑', icon: Eye, disabled: locked, action: () => run(() => switchAsset(item.id)) },
       { label: '重命名素材', icon: Pencil, disabled: locked, action: () => beginRename(item) },
+      { label: '加入素材库…', icon: Library, disabled: locked || (item.id === asset?.id && dirty), action: () => setCollectingAsset(item) },
       null, { label: '复制素材', icon: Copy, disabled: locked, action: () => run(() => copyAsset(item)) },
       { label: '创建副本', icon: CopyPlus, disabled: locked || !projectId, action: () => run(() => duplicateAsset(item)) },
       null, { label: '导出当前帧 PNG', icon: Download, disabled: locked || (item.id === asset?.id && dirty), action: () => run(() => exportAsset(item, 'png', item.id === asset?.id ? frame?.id : undefined)) },
@@ -1327,7 +1359,11 @@ export default function App() {
     null, { label: '新建图层', icon: Plus, disabled: locked || !draft || draft.layers.length >= 16, action: newLayer },
     { label: '导入 PNG 为新图层', icon: ImagePlus, disabled: locked || !draft || draft.layers.length >= 16, action: importLayer },
     { label: '清空当前图层', icon: Trash2, danger: true, disabled: locked || !activeLayer || activeLayer.locked, action: () => {
-      if (frame && window.confirm('清空当前帧中的选中图层？')) edit(document => { document.frames[frameIndex].pixels[selectedLayer] = blankImage(frame.width, frame.height); });
+      if (frame && window.confirm('清空当前帧中的选中图层？')) edit(document => {
+        const currentFrame = document.frames[frameIndex];
+        currentFrame.pixels[selectedLayer] = blankImage(frame.width, frame.height);
+        if (currentFrame.layerOverflow) delete currentFrame.layerOverflow[selectedLayer];
+      });
     } },
     null, { label: grid ? '隐藏像素网格' : '显示像素网格', icon: Grid2X2, action: () => setGrid(v => !v) },
   ];
@@ -1360,10 +1396,36 @@ export default function App() {
   } as CSSProperties}>
     <header className="app-header">
       <div className="brand"><Grid2X2 size={23} /><span>PixelArting</span><span className="local-badge">LOCAL</span></div>
-      <div className="header-meta"><span>64 × 64</span><span>Godot 4.7.2</span></div>
-      <div className="header-actions">
+      <ApplicationMenuBar>
+        <details className="app-menu"><summary>文件</summary><div className="app-menu-dropdown file-menu-dropdown" role="menu">
+          <button type="button" role="menuitem" disabled={locked} onClick={() => setDialog('project')}><Plus size={15} />新建项目</button>
+          <button type="button" role="menuitem" disabled={locked} onClick={() => setDialog('projects')}><Folder size={15} />打开 / 切换项目…</button>
+          <hr />
+          <ProjectControls project={currentProject} busy={busy} beforeDelete={confirmDiscardCurrentDraft} onBusyChange={setBusy} onUpdated={async updated => { setProjects(list => list.map(item => item.id === updated.id ? updated : item)); }} onDeleted={async () => {
+            const list = await api<Project[]>('/projects'); setProjects(list);
+            if (list.length) await switchProject(list[0].id); else { setProjectId(''); setAsset(null); setDraft(null); }
+          }} buttonText="项目设置" buttonClassName="app-menu-command" requestOpen={projectSettingsRequest} />
+          <button type="button" role="menuitem" disabled={locked || !projectId} onClick={() => void run(openAssetLibrary)}><Library size={15} />素材库</button>
+          <button type="button" role="menuitem" disabled={locked || !projectId} onClick={() => setDialog('asset')}><FilePlus2 size={15} />新建素材</button>
+          <button type="button" role="menuitem" disabled={locked || !projectId} onClick={openUpload}><Upload size={15} />导入素材</button>
+          <hr /><ExchangeControls menu projectId={projectId} busy={busy} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} onProjectImported={async imported => { setProjects(list => [...list, imported]); await switchProject(imported.id); }} />
+          <hr /><button type="button" role="menuitem" disabled={!draft || locked} onClick={() => void run(saveDraft, '版本已保存')}><Save size={15} />保存版本</button>
+        </div></details>
+        <details className="app-menu"><summary>编辑</summary><div className="app-menu-dropdown" role="menu">
+          <button type="button" role="menuitem" disabled={locked || !undo.length} onClick={undoEdit}><Undo2 size={15} />撤销</button>
+          <button type="button" role="menuitem" disabled={locked || !redo.length} onClick={redoEdit}><Redo2 size={15} />重做</button>
+          <hr /><button type="button" role="menuitem" disabled={locked || !selection} onClick={() => canvasEditorRef.current?.copySelection()}><Copy size={15} />复制选区</button>
+          <button type="button" role="menuitem" disabled={locked || !selectionClipboard} onClick={() => canvasEditorRef.current?.pasteSelection()}><ClipboardPaste size={15} />粘贴选区</button>
+        </div></details>
+        <details className="app-menu"><summary>工具</summary><div className="app-menu-dropdown tools-menu-dropdown" role="menu">
+          {drawingTools.map(({ value, label, icon: ToolIcon }) => <button key={value} type="button" role="menuitem" disabled={locked} onClick={() => selectTool(value)}><ToolIcon size={15} />{label.replace(/ \(.+\)$/, '')}</button>)}
+        </div></details>
         <WorkspaceWindowMenu layout={layout} onRestore={id => { setFocusMode(false); restorePanel(id); }} onHide={id => updatePanel(id, { visibility: 'hidden' })} onReset={() => { setFocusMode(false); resetLayout(); }} />
-        <IconButton icon={libraryCollapsed ? PanelLeftOpen : PanelLeftClose} label={libraryCollapsed ? '显示项目栏' : '切换项目栏显示'} onClick={() => libraryCollapsed ? restorePanel('library') : updatePanel('library', { visibility: 'hidden' })} />
+      </ApplicationMenuBar>
+      <button className="header-project" type="button" title="切换项目" aria-label="切换项目" disabled={locked} onClick={() => setDialog('projects')}><Folder size={14} /><span>{currentProject?.name || '未打开项目'}</span></button>
+      <div className="header-actions">
+        <button className="button secondary header-library-button" type="button" disabled={locked || !projectId} onClick={() => run(openAssetLibrary)}><Library size={16} /><span>素材库</span></button>
+        <IconButton icon={libraryCollapsed ? PanelLeftOpen : PanelLeftClose} label={libraryCollapsed ? '显示素材面板' : '切换素材面板显示'} onClick={() => libraryCollapsed ? restorePanel('library') : updatePanel('library', { visibility: 'hidden' })} />
         <IconButton icon={inspectorCollapsed ? PanelRightOpen : PanelRightClose} label={inspectorCollapsed ? '显示检查器' : '切换检查器显示'} onClick={() => inspectorCollapsed ? restorePanel('inspector') : updatePanel('inspector', { visibility: 'hidden' })} />
         <AIControls projectId={projectId} disabled={locked || !!leaveRequest} suspended={!!leaveRequest} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} />
         <button className="button secondary" disabled={!draft || locked} onClick={() => run(saveCurrent, '版本已保存')}><Save size={16} /><span>保存</span>{dirty || configDirty ? <i className="dirty-dot" /> : null}</button>
@@ -1384,22 +1446,18 @@ export default function App() {
     </header>
 
     <WorkspacePanel {...panelProps('library')} className="library" onContextMenu={event => context(event, { kind: 'library' })}>
-      <div className="section-label"><span>项目</span><div className="inline-tools"><IconButton icon={Plus} label="新建项目" disabled={locked} onClick={() => setDialog('project')} /><ProjectControls project={currentProject} busy={busy} beforeDelete={confirmDiscardCurrentDraft} onBusyChange={setBusy} onUpdated={async updated => { setProjects(list => list.map(item => item.id === updated.id ? updated : item)); }} onDeleted={async () => {
-        const list = await api<Project[]>('/projects'); setProjects(list);
-        if (list.length) await switchProject(list[0].id); else { setProjectId(''); setAsset(null); setDraft(null); }
-      }} /></div></div>
-      <label className="project-picker"><Folder size={16} /><select aria-label="项目" value={projectId} disabled={locked} onChange={event => { const nextProjectId = event.currentTarget.value; void run(() => switchProject(nextProjectId)); }}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-      <div className="section-label assets-label"><span>素材 <small>{assets.length}</small></span><div className="inline-tools"><IconButton icon={FilePlus2} label="新建素材" disabled={locked || !projectId} onClick={() => setDialog('asset')} /><IconButton icon={Upload} label="上传 PNG 或 Sprite Sheet" disabled={locked || !projectId} onClick={openUpload} /><ExchangeControls projectId={projectId} busy={busy} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImported={async next => { install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); }} onProjectImported={async imported => { setProjects(list => [...list, imported]); await switchProject(imported.id); }} /></div></div>
-      <div className="asset-list">{assets.map(item => <div key={item.id} className={`asset-row ${item.id === asset?.id ? 'selected' : ''} ${renamingAssetId === item.id ? 'renaming' : ''}`} onContextMenu={event => { event.stopPropagation(); context(event, { kind: 'asset', assetId: item.id }); }}>
-        <div role="button" tabIndex={locked ? -1 : 0} aria-disabled={locked} aria-label={`${item.name}预览`} className="asset-item" onClick={() => { if (!locked) run(() => switchAsset(item.id)); }} onKeyDown={event => { if (!locked && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); run(() => switchAsset(item.id)); } }}>
+      <div className="section-label project-assets-heading"><span>项目素材 <small>{assets.length}</small></span><div className="inline-tools"><IconButton icon={FilePlus2} label="新建素材" disabled={locked || !projectId} onClick={() => setDialog('asset')} /><IconButton icon={Upload} label="上传 PNG 或 Sprite Sheet" disabled={locked || !projectId} onClick={openUpload} /></div></div>
+      <div className="asset-list" aria-label="项目素材列表">{assets.map(item => <div key={item.id} className={`asset-row ${item.id === asset?.id ? 'selected' : ''}`} onContextMenu={event => { event.stopPropagation(); context(event, { kind: 'asset', assetId: item.id }); }}>
+        <div role="button" tabIndex={locked ? -1 : 0} aria-disabled={locked} aria-label={`编辑素材 ${item.name}`} className="asset-item" onClick={() => { if (!locked) void run(() => switchAsset(item.id)); }} onKeyDown={event => { if (!locked && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); void run(() => switchAsset(item.id)); } }}>
           <div className="asset-thumbnail">{item.id === asset?.id && frame && draft ? <Miniature frame={frame} layers={draft.layers} /> : <img src={`/api/assets/${item.id}/thumbnail?versionId=${item.currentVersionId}`} alt={`${item.name}预览`} loading="lazy" />}</div>
-          <span className="asset-copy"><span className="asset-name" onClick={event => event.stopPropagation()} onDoubleClick={event => { event.stopPropagation(); beginRename(item); }}>
-            {renamingAssetId === item.id ? <input type="text" aria-label={`重命名素材 ${item.name}`} autoFocus maxLength={100} value={renameValue} onChange={event => setRenameValue(event.target.value)} onFocus={event => event.currentTarget.select()} onClick={event => event.stopPropagation()} onKeyDown={event => { event.stopPropagation(); if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.preventDefault(); renameCancel.current = true; setRenamingAssetId(null); } }} onBlur={() => finishInlineRename(item)} /> : <strong title={item.name}>{item.name}</strong>}
-          </span><small>{item.id === asset?.id ? `${draft?.frames.length} 帧 · ${draft?.layers.length} 图层` : `${item.frameCount} 帧 · ${item.layerCount} 图层`}<br />{item.width} × {item.height}</small></span>
+          <span className="asset-copy"><span className="asset-name" onDoubleClick={event => { event.stopPropagation(); beginRename(item); }}>
+            {renamingAssetId === item.id ? <input autoFocus maxLength={100} aria-label={`重命名素材 ${item.name}`} value={renameValue} onChange={event => setRenameValue(event.target.value)} onClick={event => event.stopPropagation()} onKeyDown={event => { event.stopPropagation(); if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.preventDefault(); setRenamingAssetId(null); } }} onBlur={() => { if (renamingAssetId === item.id) finishRename(item); }} /> : <strong title={item.name}>{item.id === asset?.id ? draft?.name || item.name : item.name}{item.id === asset?.id && dirty ? ' *' : ''}</strong>}
+          </span><small>{item.width} × {item.height} · {item.frameCount} 帧</small></span>
         </div>
-        <IconButton icon={Trash2} label={`删除素材 ${item.name}`} disabled={locked} onClick={() => deleteAsset(item)} />
+        <div className="asset-row-actions"><IconButton icon={Library} label={`加入素材库 ${item.name}`} disabled={locked || (item.id === asset?.id && dirty)} onClick={() => setCollectingAsset(item)} /><IconButton icon={Trash2} label={`删除素材 ${item.name}`} disabled={locked} onClick={() => deleteAsset(item)} /></div>
       </div>)}</div>
-      {!assets.length ? <p className="empty-text">暂无素材</p> : null}
+      {!assets.length ? <p className="empty-text">新建或导入素材后，在这里编辑。完成后可手动加入素材库。</p> : null}
+      <button className="button secondary full browse-library" type="button" disabled={locked} onClick={() => run(openAssetLibrary)}><Library size={16} />浏览素材库</button>
       <div className="library-bottom"><span className="connection-dot" />本地工作区<span>v0.1</span></div>
     </WorkspacePanel>
 
@@ -1437,8 +1495,8 @@ export default function App() {
           </ToolSettingsPopover>
         </WorkspacePanel>
         <div ref={stageRef} className={`stage ${preview ? 'comparing' : ''}`} onContextMenu={event => context(event, { kind: 'canvas' })}>
-          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushPressure={brushPressure} brushSpacing={brushSpacing} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} onionFrames={onionFrames} onionOpacity={onionOpacity} onionColor={onionColor} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onFrameMetadataChange={metadata => edit(document => { document.frames[frameIndex] = { ...document.frames[frameIndex], ...metadata }; })} onPickColor={(color, opacity) => { colorRef.current = color; setPickedColor({ color, opacity }); }} onChange={image => edit(document => { document.frames[frameIndex].pixels[selectedLayer] = image; })} /></div>
-          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} brushSize={brushSize} brushOpacity={brushOpacity} brushPressure={brushPressure} brushSpacing={brushSpacing} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
+          <div className="stage-view"><span className="stage-label">{preview ? '当前版本' : activeLayer?.name}{activeLayer?.locked ? ' · 已锁定' : ''}</span><CanvasEditor ref={canvasEditorRef} key={asset?.id} frame={frame} layers={draft.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} layerOverflow={frame.layerOverflow?.[selectedLayer]} layerOverflows={frame.layerOverflow} brushSize={brushSize} brushOpacity={brushOpacity} brushPressure={brushPressure} brushSpacing={brushSpacing} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} onionFrames={onionFrames} onionOpacity={onionOpacity} onionColor={onionColor} readonly={locked} finding={finding} difference={previewChange?.changedBounds} onStrokeStateChange={setDrawingStroke} onSelectionChange={setSelection} onClipboardChange={setSelectionClipboard} onFrameMetadataChange={metadata => edit(document => { document.frames[frameIndex] = { ...document.frames[frameIndex], ...metadata }; })} onPickColor={(color, opacity) => { colorRef.current = color; setPickedColor({ color, opacity }); }} onChange={(image, overflow) => edit(document => { const currentFrame = document.frames[frameIndex]; currentFrame.pixels[selectedLayer] = image; if (overflow !== undefined) { currentFrame.layerOverflow = { ...(currentFrame.layerOverflow || {}) }; if (Object.keys(overflow).length) currentFrame.layerOverflow[selectedLayer] = overflow; else delete currentFrame.layerOverflow[selectedLayer]; } })} /></div>
+          {preview ? <div className="stage-view"><span className="stage-label accent-text">修复预览</span><CanvasEditor ref={previewEditorRef} frame={preview.document.frames[frameIndex]} layers={preview.document.layers} activeLayer={selectedLayer} tool={tool} colorRef={colorRef} colorOpacityRef={colorOpacityRef} layerOverflow={preview.document.frames[frameIndex].layerOverflow?.[selectedLayer]} layerOverflows={preview.document.frames[frameIndex].layerOverflow} brushSize={brushSize} brushOpacity={brushOpacity} brushPressure={brushPressure} brushSpacing={brushSpacing} brushShape={brushShape} shapeStrokeSize={shapeSettings.strokeSize} shapeMode={shapeSettings.mode} fillSettings={fillSettings} eyedropperSample={eyedropperSample} zoom={zoom} onZoomChange={setZoom} grid={grid} gridColor={canvasDisplay.gridColor} gridOpacity={canvasDisplay.gridOpacity} gridSize={canvasDisplay.gridSize} backgroundStyle={canvasDisplay.backgroundStyle} backgroundColor={canvasDisplay.backgroundColor} checkerSize={canvasDisplay.checkerSize} guides={guides} difference={previewChange?.changedBounds} readonly label="修复结果画布" /></div> : null}
         </div>
         <div className="canvas-toolbar-wrap">
           <div className="canvas-toolbar" aria-label="画布操作">
@@ -1509,6 +1567,16 @@ export default function App() {
       {tab === 'versions' ? <div className="panel-content"><VersionHistory asset={asset} draft={draft} selectedLayer={selectedLayer} frameIndex={frameIndex} zoom={zoom} colorRef={colorRef} busy={busy} locked={locked} onBusyChange={setBusy} onRestore={install} beforeRestore={confirmDiscardCurrentDraft} /></div> : null}
     </WorkspacePanel>
 
+    {libraryOpen ? <AssetLibraryDialog assets={libraryAssets} currentProjectId={projectId} busy={busy} onClose={() => setLibraryOpen(false)} onUse={item => void run(() => useLibraryAsset(item))} onRemove={item => void run(() => removeLibraryAsset(item))} onRefresh={() => void run(refreshLibrary)} /> : null}
+    {collectingAsset ? <div className="modal-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="collect-title" onKeyDown={event => {
+      event.stopPropagation();
+      if (event.key === 'Escape' && !busy) setCollectingAsset(null);
+      if (event.key === 'Tab') {
+        const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+        const edge = event.shiftKey ? buttons[0] : buttons.at(-1);
+        if (event.target === edge) { event.preventDefault(); (event.shiftKey ? buttons.at(-1) : buttons[0])?.focus(); }
+      }
+    }}><div className="modal-heading"><h2 id="collect-title">加入素材库</h2></div><p>确认收录「{collectingAsset.name}」的当前保存版本？</p><p>收录后可跨项目复用。后续编辑原素材不会改变库中快照。</p><div className="leave-actions"><button className="button secondary" autoFocus disabled={busy} onClick={() => setCollectingAsset(null)}>取消</button><button className="button primary" disabled={busy} onClick={() => void run(collectAsset)}>确认加入素材库</button></div></section></div> : null}
     <input ref={layerInput} type="file" accept="image/png" hidden onChange={e => { const file = e.target.files?.[0]; if (file && !locked) { if (file.size > 8 * 1024 * 1024 || file.type !== 'image/png') setNotice({ message: '请选择 8 MB 以内的 PNG', error: true }); else run(() => addLayerFile(file)); } e.target.value = ''; }} />
     {menu ? <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} /> : null}
     <footer className="status-bar"><span>{busy ? '处理中…' : draftStatus === 'saving' || configDraftStatus === 'saving' ? '自动保存中…' : draftStatus === 'saved' || configDraftStatus === 'saved' ? '草稿已自动保存' : draftStatus === 'error' || configDraftStatus === 'error' ? '自动保存失败' : dirty || configDirty ? '未保存的编辑' : '就绪'}</span><span>{frame ? `${frame.width} × ${frame.height} · RGBA · ${draft?.layers.length} 图层` : 'PNG / Sprite Sheet'}</span><span>Python · FastAPI</span></footer>
@@ -1534,10 +1602,11 @@ export default function App() {
     </div> : null}
     {dialog ? <div className="modal-backdrop" inert={!!leaveRequest} style={leaveRequest ? { visibility: 'hidden' } : undefined} onMouseDown={event => { if (event.target === event.currentTarget && !busy) setDialog(null); }}>
       <section className={`modal ${dialog === 'upload' ? 'import-modal' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
-        <div className="modal-heading"><h2 id="dialog-title">{dialog === 'project' ? '新建项目' : dialog === 'asset' ? '新建素材' : '导入素材'}</h2><IconButton icon={X} label="关闭对话框" disabled={busy} onClick={() => setDialog(null)} /></div>
+        <div className="modal-heading"><h2 id="dialog-title">{dialog === 'project' ? '新建项目' : dialog === 'projects' ? '切换项目' : dialog === 'asset' ? '新建素材' : '导入素材'}</h2><IconButton icon={X} label="关闭对话框" disabled={busy} onClick={() => setDialog(null)} /></div>
         {dialog === 'project' ? <form onSubmit={event => { event.preventDefault(); run(async () => {
+          if (!await confirmDiscardCurrentDraft()) return;
           const created = await api<Project>('/projects', { name: projectName.trim() });
-          setProjects(await api<Project[]>('/projects')); await switchProject(created.id); setDialog(null); setProjectName('');
+          setProjects(await api<Project[]>('/projects')); await switchProject(created.id, true); setDialog(null); setProjectName('');
         }); }}>
           <label className="field-label">项目名称<input autoFocus value={projectName} maxLength={80} required onChange={e => setProjectName(e.target.value)} /></label>
           <button className="button primary full" disabled={busy || !projectName.trim()}><Plus size={16} />创建项目</button>
@@ -1549,7 +1618,10 @@ export default function App() {
           <label className="field-label">素材名称<input aria-label="素材名称" autoFocus value={assetName} maxLength={100} required onChange={e => setAssetName(e.target.value)} /></label>
           <div className="property-grid"><label>宽<input aria-label="新素材宽度" type="number" min={1} max={512} value={assetWidth} required onChange={e => setAssetWidth(Number(e.target.value))} /></label><label>高<input aria-label="新素材高度" type="number" min={1} max={512} value={assetHeight} required onChange={e => setAssetHeight(Number(e.target.value))} /></label></div>
           <button className="button primary full" disabled={busy || !assetName.trim()}><FilePlus2 size={16} />创建素材</button>
-        </form> : <SpriteSheetImport projectId={projectId} busy={busy} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImport={async next => {
+        </form> : dialog === 'projects' ? <div className="project-switcher-list" role="listbox" aria-label="项目列表">
+          {projects.map(project => <button key={project.id} type="button" role="option" aria-selected={project.id === projectId} className={project.id === projectId ? 'selected' : ''} disabled={busy || project.id === projectId} onClick={() => void run(async () => { await switchProject(project.id); setDialog(null); })}><Folder size={17} /><span>{project.name}</span>{project.id === projectId ? <small>当前项目</small> : null}</button>)}
+          {!projects.length ? <p className="empty-text">还没有项目</p> : null}
+        </div> : <SpriteSheetImport projectId={projectId} busy={busy} beforeImport={confirmDiscardCurrentDraft} onBusyChange={setBusy} onImport={async next => {
           install(next); setAssets(await api<AssetItem[]>(`/projects/${projectId}/assets`)); setTab('layers'); setDialog(null);
         }} />}
       </section>

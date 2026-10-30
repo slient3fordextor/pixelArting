@@ -19,6 +19,10 @@ MAX_PROVIDER_BYTES = 32 * 1024 * 1024
 class AiProviderError(Exception):
     """A user-safe provider failure with no credentials in its message."""
 
+    def __init__(self, message: str, category: str = "provider_error"):
+        super().__init__(message)
+        self.category = category
+
 
 def contains_sensitive_string(value: Any, secret: str) -> bool:
     pending, visited = [value], set()
@@ -118,7 +122,7 @@ class OpenAICompatibleProvider:
 
     def _client(self) -> httpx.Client:
         if not self.config.apiKey:
-            raise AiProviderError("尚未配置 AI API Key")
+            raise AiProviderError("尚未配置 AI API Key", "auth_error")
         return httpx.Client(
             base_url=self.config.baseUrl,
             headers={"Authorization": f"Bearer {self.config.apiKey}", "Content-Type": "application/json"},
@@ -150,12 +154,31 @@ class OpenAICompatibleProvider:
                 404: "AI 服务地址或模型不存在，请检查配置",
                 429: "AI 服务额度不足或请求过多，请稍后重试",
             }
-            detail = messages.get(error.response.status_code, "AI 服务返回错误，请稍后重试")
-            raise AiProviderError(f"{detail} (HTTP {error.response.status_code})") from error
-        except (httpx.HTTPError, ValueError, TypeError) as error:
+            status = error.response.status_code
+            body = error.response.text.lower()
+            model_error = any(token in body for token in ("model", "deployment", "engine"))
+            category = {
+                401: "auth_error", 403: "auth_error", 404: "model_not_found" if model_error else "unsupported_interface",
+                405: "unsupported_interface", 408: "timeout", 429: "rate_limited", 501: "unsupported_interface",
+            }.get(status, "provider_error")
+            if 500 <= status <= 599:
+                category = "transient_error"
+            detail = messages.get(status, "AI 服务返回错误，请稍后重试")
+            if category == "unsupported_interface":
+                detail = "AI 服务不支持所需接口，请检查服务兼容性"
+            elif category == "model_not_found":
+                detail = "AI 服务中不存在指定模型，请检查模型名称"
+            raise AiProviderError(f"{detail} (HTTP {status})", category) from error
+        except httpx.TimeoutException as error:
+            raise AiProviderError("AI 服务请求超时，请稍后重试", "timeout") from error
+        except (httpx.ConnectError, httpx.UnsupportedProtocol, httpx.InvalidURL) as error:
+            raise AiProviderError("无法连接 AI 服务，请检查服务地址", "address_error") from error
+        except httpx.HTTPError as error:
             # Do not include response text or URL: compatible providers can echo
             # request headers and that would risk leaking the user's key.
-            raise AiProviderError("AI 服务请求失败，请检查服务地址、模型和网络") from error
+            raise AiProviderError("AI 服务请求失败，请检查服务地址、模型和网络", "address_error") from error
+        except (ValueError, TypeError) as error:
+            raise AiProviderError("AI 服务返回格式无效", "unsupported_interface") from error
         if not isinstance(value, dict):
             raise AiProviderError("AI 服务返回格式无效")
         return value
@@ -257,3 +280,47 @@ class OpenAICompatibleProvider:
             "calledExternally": True,
             "candidates": candidates,
         }
+
+    def test_connection(self) -> dict[str, dict[str, str]]:
+        """Probe both OpenAI-compatible endpoints without creating a task."""
+
+        checks: dict[str, dict[str, str]] = {}
+        if not self.config.apiKey:
+            failure = {"status": "failed", "code": "auth_error", "message": "尚未配置 AI API Key"}
+            return {"baseUrl": {"status": "skipped", "code": "auth_error", "message": "等待 API Key"}, "apiKey": failure, "textModel": failure, "imageModel": failure}
+
+        probes = (
+            ("textModel", "chat/completions", {"model": self.config.textModel, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}),
+            ("imageModel", "images/generations", {"model": self.config.imageModel, "prompt": "单色像素点", "size": self.config.imageSize, "n": 1}),
+        )
+        reachable = False
+        auth_ok = True
+        auth_verified = False
+        failure_categories: list[str] = []
+        for name, path, payload in probes:
+            try:
+                self._post(path, payload)
+                checks[name] = {"status": "passed", "code": "ok", "message": "接口和模型可用"}
+                reachable = True
+                auth_verified = True
+            except AiProviderError as error:
+                checks[name] = {"status": "failed", "code": error.category, "message": str(error)}
+                failure_categories.append(error.category)
+                if error.category not in {"address_error", "timeout"}:
+                    reachable = True
+                    auth_verified = True
+                if error.category == "auth_error":
+                    auth_ok = False
+        if reachable:
+            checks["baseUrl"] = {"status": "passed", "code": "ok", "message": "服务地址可访问"}
+        elif failure_categories and all(category == "timeout" for category in failure_categories):
+            checks["baseUrl"] = {"status": "failed", "code": "timeout", "message": "连接 AI 服务超时，请检查地址或网络"}
+        else:
+            checks["baseUrl"] = {"status": "failed", "code": "address_error", "message": "无法连接 AI 服务，请检查服务地址"}
+        if not auth_ok:
+            checks["apiKey"] = {"status": "failed", "code": "auth_error", "message": "AI 服务身份验证失败，请检查 API Key"}
+        elif auth_verified:
+            checks["apiKey"] = {"status": "passed", "code": "ok", "message": "鉴权通过"}
+        else:
+            checks["apiKey"] = {"status": "skipped", "code": "timeout" if failure_categories and all(category == "timeout" for category in failure_categories) else "address_error", "message": "服务未响应，暂无法验证"}
+        return {key: checks[key] for key in ("baseUrl", "apiKey", "textModel", "imageModel")}

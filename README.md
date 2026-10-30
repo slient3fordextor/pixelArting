@@ -31,7 +31,7 @@ sh desktop/start-dev.sh
 
 Linux 可使用 `desktop/PixelArting.desktop` 启动；该文件包含当前工作区路径，移动项目后需更新。桌面端自动选择私有 loopback 端口、启动后端，并在窗口关闭后停止该进程；未保存时先确认。当前为工作区启动版，尚未打包 Python 运行时和跨平台安装包。详情见 [桌面客户端](docs/desktop-client.md)。数据保存到 `data/pixelart.sqlite3`，原始 PNG 保存在 `data/sources/`；环境变量 `PIXELART_DATA_DIR` 可改变数据目录。
 
-当前不提供独立浏览器启动入口；React 构建产物只由 Electron 窗口加载。首版使用有界同步处理，没有 Redis、任务队列和登录功能；仅用于本地单用户，不能直接暴露到公网。
+当前不提供独立浏览器启动入口；React 构建产物只由 Electron 窗口加载。AI 生成使用 SQLite 持久化任务队列和有界本地执行器，暂没有 Redis、多用户登录和公网部署能力；应用重启会恢复未完成任务。AI API Key 优先保存到操作系统密钥环，旧 SQLite 配置会在启动时迁移；无可用密钥环时保留 SQLite 兼容回退。
 
 ## 当前功能
 

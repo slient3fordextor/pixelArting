@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Check, CircleStop, CopyPlus, Download, LoaderCircle, RefreshCw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
+import { Check, CircleStop, CopyPlus, Download, LoaderCircle, Pencil, RefreshCw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
 import { api } from './api';
 import type { Asset } from './types';
 
@@ -20,6 +20,8 @@ type AiConfig = {
 };
 type AiProfile = AiConfig & { id: string; name: string };
 type AiProfilesResponse = { profiles: AiProfile[]; activeId: string };
+type ConnectionCheck = { status: 'passed' | 'failed' | 'skipped'; code: string; message: string };
+type ConnectionTest = { ok: boolean; checks: Record<'baseUrl' | 'apiKey' | 'textModel' | 'imageModel', ConnectionCheck> };
 type Candidate = {
   id: string;
   summary?: string;
@@ -84,6 +86,8 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   const [task, setTask] = useState<Generation | null>(null);
   const [history, setHistory] = useState<Generation[]>([]);
   const [working, setWorking] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [connectionTest, setConnectionTest] = useState<ConnectionTest | null>(null);
   const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const profileComboboxRef = useRef<HTMLDivElement>(null);
@@ -349,6 +353,31 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
     finally { setWorking(false); }
   }
 
+  async function testConnection() {
+    if (working || taskActive || testingConnection) return;
+    setTestingConnection(true); setConnectionTest(null); setNotice(null);
+    try {
+      const result = await api<ConnectionTest>('/ai/test-connection', connectionPayload(), 'POST');
+      setConnectionTest(result);
+      setNotice({ text: result.ok ? 'AI 连接测试通过' : 'AI 连接测试发现问题', error: !result.ok });
+    } catch (error) {
+      setNotice({ text: error instanceof Error ? error.message : 'AI 连接测试失败', error: true });
+    } finally { setTestingConnection(false); }
+  }
+
+  async function renameProfile() {
+    if (working || !profileApiAvailable || !activeProfileId || !activeProfile || taskActive || !profileNameChanged) return;
+    const name = profileName.trim() || '未命名模型档案';
+    setWorking(true); setNotice(null);
+    try {
+      const profile = await api<AiProfile>(`/ai/profiles/${encodeURIComponent(activeProfileId)}`, { name }, 'PUT');
+      setProfiles(list => list.map(item => item.id === profile.id ? profile : item));
+      setProfileName(profile.name);
+      setNotice({ text: `模型档案已重命名为 ${profile.name}` });
+    } catch (error) { setNotice({ text: error instanceof Error ? error.message : '模型档案重命名失败', error: true }); }
+    finally { setWorking(false); }
+  }
+
   async function generate() {
     if (!canGenerate) return;
     setWorking(true); setNotice(null); setTask(null);
@@ -458,7 +487,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
                   </div>)}
                 </div> : null}
               </div></div>
-              <div className="profile-name-tools"><label className="field-label profile-name-label">档案名称<input className="profile-name-input" aria-label="AI 档案名称" value={profileName} disabled={working || taskActive} onChange={event => setProfileName(event.target.value)} /></label><button className="icon-button profile-add-button" type="button" title="新建模型档案" aria-label="新建模型档案" disabled={working || taskActive || configChanged} onClick={() => void createProfile()}><CopyPlus size={16} /></button></div>
+              <div className="profile-name-tools"><label className="field-label profile-name-label">档案名称<input className="profile-name-input" aria-label="AI 档案名称" value={profileName} disabled={working || taskActive} onChange={event => setProfileName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void renameProfile(); } if (event.key === 'Escape') { event.preventDefault(); setProfileName(activeProfile?.name || ''); } }} /></label><div className="profile-name-actions"><button className="icon-button profile-rename-button" type="button" title="保存档案名称" aria-label="保存档案名称" disabled={working || taskActive || !profileNameChanged} onClick={() => void renameProfile()}><Pencil size={15} /></button><button className="icon-button profile-add-button" type="button" title="新建模型档案" aria-label="新建模型档案" disabled={working || taskActive || configChanged} onClick={() => void createProfile()}><CopyPlus size={16} /></button></div></div>
               <div className="profile-delete-tools"><button className="icon-button profile-delete-button" type="button" title={profiles.length <= 1 ? '至少保留一个模型档案，当前档案不可删除' : `删除当前模型档案“${profileName.trim() || activeProfile?.name || '未命名'}”`} aria-label={profiles.length <= 1 ? '删除当前模型档案（至少保留一个，暂不可删除）' : `删除当前模型档案“${profileName.trim() || activeProfile?.name || '未命名'}”`} disabled={working || taskActive || !activeProfile || profiles.length <= 1} onClick={() => activeProfile && void deleteProfile(activeProfile)}><Trash2 size={15} /></button><span className="profile-delete-hint">{profiles.length <= 1 ? '至少保留一个档案' : `删除当前：${profileName.trim() || activeProfile?.name || '未命名'}`}</span></div>
             </div> : null}
             <label className="field-label">OpenAI-compatible Base URL<input aria-label="AI Base URL" type="url" value={baseUrl} placeholder="https://api.openai.com/v1" onChange={event => setBaseUrl(event.target.value)} /></label>
@@ -469,7 +498,13 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
             </div>
             <label className="field-label">图像服务生成尺寸<input aria-label="AI 服务图像尺寸" value={imageSize} placeholder="1024x1024" onChange={event => setImageSize(event.target.value)} /></label>
             <details className="ai-advanced"><summary>高级设置</summary><div className="property-grid"><label>输出 token 上限<input aria-label="AI 输出 token 上限" type="number" min={256} max={32768} value={maxOutputTokens} onChange={event => setMaxOutputTokens(Number(event.target.value))} /></label><label>Token 限额参数<select aria-label="AI Token 限额参数" value={tokenLimitParameter} onChange={event => setTokenLimitParameter(event.target.value as typeof tokenLimitParameter)}><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label></div><label className="checkbox-row"><input type="checkbox" checked={sendImageBackground} onChange={event => setSendImageBackground(event.target.checked)} />发送图像 background 参数</label></details>
-            <button className="button secondary" type="button" disabled={working || taskActive || !settingsChanged} onClick={() => void saveConfig()}><Settings2 size={15} />保存连接设置</button>
+            <div className="ai-connection-actions"><button className="button secondary" type="button" disabled={working || taskActive || testingConnection} onClick={() => void testConnection()}>{testingConnection ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}测试连接</button><button className="button secondary" type="button" disabled={working || taskActive || !settingsChanged || testingConnection} onClick={() => void saveConfig()}><Settings2 size={15} />保存连接设置</button></div>
+            {connectionTest ? <div className={`ai-connection-result${connectionTest.ok ? ' is-ok' : ' is-error'}`} aria-label="AI 连接测试结果">
+              {([['baseUrl', '服务地址'], ['apiKey', 'API Key'], ['textModel', '文本模型'], ['imageModel', '图像模型']] as const).map(([key, label]) => {
+                const check = connectionTest.checks[key];
+                return <div className="ai-connection-check" key={key}><span className={`ai-connection-dot ${check.status}`} aria-hidden="true" /><strong>{label}</strong><span>{check.message}</span></div>;
+              })}
+            </div> : null}
           </div>
         </details>
         </fieldset><p className="ai-cost">将向所选服务发送描述。生成费用由服务商收取。</p>

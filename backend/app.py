@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,7 +34,15 @@ def create_app(data_root: Path | None = None):
 
     @asynccontextmanager
     async def lifespan(application):
-        store.recover_generations()
+        for generation_id in store.recover_generations():
+            try:
+                config = store.generation_config(generation_id) or store.ai_config()
+                executor.submit(run_generation, generation_id, config)
+            except (KeyError, ValueError):
+                try:
+                    store.update_generation(generation_id, "failed", error="任务配置损坏，请重新生成")
+                except (KeyError, Conflict):
+                    pass
         yield
         executor.shutdown(wait=True, cancel_futures=True)
 
@@ -43,7 +52,7 @@ def create_app(data_root: Path | None = None):
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error):
-        if request.url.path == "/api/ai/config" or request.url.path.startswith("/api/ai/profiles"):
+        if request.url.path in {"/api/ai/config", "/api/ai/test-connection"} or request.url.path.startswith("/api/ai/profiles"):
             # FastAPI's default validation output contains the rejected input,
             # which must never include an API key.
             return JSONResponse({"detail": [
@@ -105,6 +114,22 @@ def create_app(data_root: Path | None = None):
     def update_ai_config(body: AiConfigUpdate):
         return store.save_ai_config(body)
 
+    @app.post("/api/ai/test-connection")
+    def test_ai_connection(body: AiConfigUpdate):
+        current = store.ai_config()
+        fields = body.model_dump(exclude_none=True, exclude={"clearApiKey"})
+        # An empty key has the same meaning as the settings form: keep the
+        # saved credential. Clearing is explicit and makes the probe fail
+        # without ever writing the change to SQLite.
+        if not fields.get("apiKey"):
+            fields.pop("apiKey", None)
+        if body.clearApiKey:
+            fields["apiKey"] = None
+        config = current.model_copy(update=fields)
+        provider = app.state.ai_provider_factory(config)
+        checks = provider.test_connection()
+        return {"ok": all(item.get("status") == "passed" for item in checks.values()), "checks": checks}
+
     @app.get("/api/ai/profiles")
     def ai_profiles():
         return store.list_ai_profiles()
@@ -135,7 +160,19 @@ def create_app(data_root: Path | None = None):
             config = store.generation_config(generation_id) or config
             provider = app.state.ai_provider_factory(config)
             generate = provider.generate_text if generation.mode == "agent_draw" else provider.generate_image
-            result = generate(generation.request)
+            result = None
+            for attempt in range(3):
+                try:
+                    result = generate(generation.request)
+                    break
+                except AiProviderError as error:
+                    if error.category not in {"rate_limited", "timeout", "address_error", "transient_error"} or attempt == 2:
+                        raise
+                    if store.generation(generation_id).status == "cancelled":
+                        return
+                    time.sleep(2 ** attempt)
+            if result is None:
+                raise AiProviderError("AI 生成失败，请稍后重试")
             if store.generation(generation_id).status == "cancelled":
                 return
             if config.apiKey and contains_sensitive_string(result, config.apiKey):
@@ -271,6 +308,31 @@ def create_app(data_root: Path | None = None):
     @app.get("/api/projects/{project_id}/assets")
     def assets(project_id: str):
         return store.list_assets(project_id)
+
+    @app.get("/api/assets/library")
+    def library_assets():
+        return store.list_library_assets()
+
+    @app.post("/api/assets/{asset_id}/library", status_code=201)
+    def collect_asset(asset_id: str, body: DeleteAssetRequest):
+        return store.collect_asset(asset_id, body.expectedCurrentVersionId)
+
+    @app.get("/api/library/{entry_id}/thumbnail")
+    def library_thumbnail(entry_id: str):
+        entry = store.library_entry(entry_id)
+        document = Document.model_validate_json(entry["document"])
+        image = composite(document, document.frames[0])
+        image.thumbnail((96, 96), Image.Resampling.NEAREST)
+        return Response(png_bytes(image), media_type="image/png")
+
+    @app.delete("/api/library/{entry_id}")
+    def remove_library_entry(entry_id: str, body: DeleteAssetRequest):
+        store.remove_library_entry(entry_id, body.expectedCurrentVersionId)
+        return {"removed": True, "id": entry_id}
+
+    @app.post("/api/projects/{project_id}/library/{entry_id}/use", status_code=201)
+    def reuse_library_entry(project_id: str, entry_id: str):
+        return store.reuse_library_entry(project_id, entry_id)
 
     @app.post("/api/projects/{project_id}/assets/blank", status_code=201)
     def blank_asset(project_id: str, body: BlankAssetCreate):

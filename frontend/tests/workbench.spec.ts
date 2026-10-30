@@ -565,8 +565,22 @@ test('frame guides respond immediately and layer dragging preserves other layers
   await expect.poll(() => pixel(18, 13)).toEqual([0, 0, 0, 0]);
 
   await drag([15, 13], [80, 13]);
-  await expect.poll(() => pixel(63, 13)).toEqual([33, 143, 131, 255]);
+  await expect.poll(() => pixel(63, 13)).toEqual([0, 0, 0, 0]);
+  await expect(page.locator('.overflow-pixel')).toHaveCount(1);
+  await page.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.locator('.toast[role="status"]')).toContainText('版本已保存');
+  await page.reload();
+  await page.locator('.asset-row').filter({ hasText: '图层位移验证' }).locator('.asset-item').click();
+  await page.locator('.frame-item').nth(1).click();
+  await expect(page.locator('.overflow-pixel')).toHaveCount(1);
+  await page.getByRole('button', { name: '移动图层 (V)', exact: true }).click();
+  // Even a layer whose pixels are all outside can be moved from the canvas.
+  await drag([40, 13], [-25, 13]);
+  await expect.poll(() => pixel(15, 13)).toEqual([33, 143, 131, 255]);
+  await expect(page.locator('.overflow-pixel')).toHaveCount(0);
   await page.getByRole('button', { name: '撤销', exact: true }).click();
+  await expect(page.locator('.overflow-pixel')).toHaveCount(1);
+  await page.getByRole('button', { name: '重做', exact: true }).click();
   await expect.poll(() => pixel(15, 13)).toEqual([33, 143, 131, 255]);
   await page.locator('.frame-item').first().click();
   await expect.poll(() => pixel(10, 10)).toEqual([33, 143, 131, 255]);

@@ -3,6 +3,7 @@ export type Layer = { id: string; name: string; visible: boolean; locked: boolea
 export type ColorSampleSource = 'layer' | 'merged';
 export type Frame = {
   id: string; width: number; height: number; pixels: Record<string, string>;
+  layerOverflow?: Record<string, Record<string, string>>;
   origin: { x: number; y: number } | null; baselineY: number | null;
   collisionRects: { x: number; y: number; width: number; height: number }[];
 };
@@ -12,6 +13,7 @@ export type Document = { schemaVersion: '1.1'; name: string; type: 'image' | 'ch
 export type Version = { id: string; parent: string | null; operation: string; checksum: string; created: string };
 export type Asset = { id: string; name: string; projectId: string; currentVersionId: string; versions: Version[]; document: Document };
 export type AssetItem = Pick<Asset, 'id' | 'name' | 'currentVersionId'> & { frameCount: number; layerCount: number; width: number; height: number };
+export type LibraryAsset = Omit<AssetItem, 'currentVersionId'> & { sourceAssetId: string; versionId: string; projectName: string; checksum: string; created: string };
 export type Project = { id: string; name: string };
 export type CheckConfig = {
   targetWidth: number; targetHeight: number; maxColors: number; palette: string[];

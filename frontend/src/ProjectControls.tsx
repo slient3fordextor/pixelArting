@@ -11,6 +11,9 @@ type ProjectControlsProps = {
   onUpdated: (project: Project) => void | Promise<void>;
   onDeleted: () => void | Promise<void>;
   onBusyChange?: (busy: boolean) => void;
+  buttonText?: string;
+  buttonClassName?: string;
+  requestOpen?: number;
 };
 
 async function checkedResponse(response: Response) {
@@ -20,7 +23,7 @@ async function checkedResponse(response: Response) {
   throw new Error(typeof detail === 'string' ? detail : Array.isArray(detail) ? detail.map((item: { msg: string }) => item.msg).join('；') : `请求失败 (${response.status})`);
 }
 
-export function ProjectControls({ project, busy, beforeDelete, onUpdated, onDeleted, onBusyChange }: ProjectControlsProps) {
+export function ProjectControls({ project, busy, beforeDelete, onUpdated, onDeleted, onBusyChange, buttonText, buttonClassName, requestOpen = 0 }: ProjectControlsProps) {
   const [editing, setEditing] = useState<Project | null>(null);
   const [name, setName] = useState('');
   const [confirmation, setConfirmation] = useState('');
@@ -42,6 +45,10 @@ export function ProjectControls({ project, busy, beforeDelete, onUpdated, onDele
   useEffect(() => {
     if (editing && editing.id !== project?.id && !working) setEditing(null);
   }, [project?.id, editing?.id, working]);
+
+  useEffect(() => {
+    if (requestOpen > 0) open();
+  }, [requestOpen]);
 
   function open() {
     if (!project || disabled) return;
@@ -81,7 +88,7 @@ export function ProjectControls({ project, busy, beforeDelete, onUpdated, onDele
   }
 
   return <>
-    <button className="icon-button" type="button" title="管理项目" aria-label="管理项目" disabled={!project || disabled} onClick={open}><Settings2 size={17} /></button>
+    <button className={buttonClassName || 'icon-button'} role={buttonText ? 'menuitem' : undefined} type="button" title={buttonText || '管理项目'} aria-label={buttonText || '管理项目'} disabled={!project || disabled} onClick={open}>{buttonText ? <><Settings2 size={15} />{buttonText}</> : <Settings2 size={17} />}</button>
     {editing ? createPortal(<div className="project-management-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !disabled) setEditing(null); }}>
       <section ref={dialogRef} className="project-management-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} aria-busy={working} onKeyDown={event => {
         event.stopPropagation();

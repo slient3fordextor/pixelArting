@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-export const PANEL_TITLES = { library: '项目栏', inspector: '检查器', tools: '工具栏', palette: '调色板', timeline: '时间轴' } as const;
+export const PANEL_TITLES = { library: '素材', inspector: '检查器', tools: '工具栏', palette: '调色板', timeline: '时间轴' } as const;
 export type PanelId = keyof typeof PANEL_TITLES;
 export const PANEL_IDS = Object.keys(PANEL_TITLES) as PanelId[];
 export const WORKSPACE_LAYOUT_KEY = 'pixelart-workspace-layout-v1';

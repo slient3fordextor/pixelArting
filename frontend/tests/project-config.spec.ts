@@ -1,10 +1,19 @@
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
+
+async function selectProject(page: Page, name: string) {
+  await expect(page.getByRole('button', { name: '切换项目', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: '切换项目', exact: true }).click();
+  await page.getByRole('option', { name, exact: true }).click();
+  await expect(page.locator('.header-project')).toHaveText(name);
+}
+
 
 test('project settings remain separate after switching and reloading', async ({ page, request }) => {
   const first = await (await request.post('/api/projects', { data: { name: '配置隔离 A' } })).json();
   const second = await (await request.post('/api/projects', { data: { name: '配置隔离 B' } })).json();
   await page.goto('/');
-  await page.getByLabel('项目', { exact: true }).selectOption(first.id);
+  await selectProject(page, first.name);
   await page.getByRole('button', { name: '质检', exact: true }).click();
   await page.getByLabel('目标宽度').fill('32');
   await page.getByLabel('预期 walk 帧数').fill('6');
@@ -14,11 +23,11 @@ test('project settings remain separate after switching and reloading', async ({ 
   await page.getByRole('button', { name: '应用调色板', exact: true }).click();
   await page.getByRole('button', { name: '保存项目配置', exact: true }).click();
   await expect(page.locator('.toast')).toContainText('项目配置已保存');
-  await page.getByLabel('项目', { exact: true }).selectOption(second.id);
+  await selectProject(page, second.name);
   await expect(page.getByLabel('目标宽度')).toHaveValue('64');
   await expect(page.getByLabel('项目调色板')).toHaveValue('');
   await page.reload();
-  await page.getByLabel('项目', { exact: true }).selectOption(first.id);
+  await selectProject(page, first.name);
   await page.getByRole('button', { name: '质检', exact: true }).click();
   await expect(page.getByLabel('目标宽度')).toHaveValue('32');
   await expect(page.getByLabel('预期 walk 帧数')).toHaveValue('6');
@@ -31,13 +40,13 @@ test('saved check reports can be reopened after reloading', async ({ page, reque
   const project = await (await request.post('/api/projects', { data: { name: '报告历史验证' } })).json();
   await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '质检素材' } });
   await page.goto('/');
-  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await selectProject(page, project.name);
   await page.getByRole('button', { name: '质检', exact: true }).click();
   await page.getByRole('button', { name: '运行质检', exact: true }).click();
   await expect(page.locator('.rule-state')).toHaveCount(8);
   const reportId = await page.getByLabel('检查历史').inputValue();
   await page.reload();
-  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await selectProject(page, project.name);
   await page.getByRole('button', { name: '质检', exact: true }).click();
   await expect(page.getByLabel('检查历史')).toBeVisible();
   await page.getByLabel('检查历史').selectOption(reportId);

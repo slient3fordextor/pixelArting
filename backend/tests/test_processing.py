@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import zipfile
 
@@ -6,7 +7,7 @@ import pytest
 from PIL import Image
 
 from backend.exports import export_bundle
-from backend.images import checksum, composite, decode_image, encode_image, png_bytes
+from backend.images import checksum, composite, decode_image, encode_image, png_bytes, validate_images
 from backend.models import Animation, CheckConfig, Document, Frame, FrameRef, Layer, Point, RepairAction
 from backend.quality import inspect
 from backend.repairs import repair
@@ -25,6 +26,29 @@ def test_hidden_layers_preserved_and_opacity_composites():
     doc.layers[-1].visible = False
     assert composite(doc, doc.frames[0]).getpixel((0, 0)) == (255, 0, 0, 255)
     assert decode_image(doc.frames[0].pixels["top"]).getpixel((0, 0)) == (0, 0, 255, 255)
+
+
+def test_layer_overflow_is_validated_and_kept_outside_canvas():
+    doc = document()
+    doc.frames[0].layerOverflow = {"base": {"-1,2": "#214f83ff"}}
+    validate_images(doc)
+    restored = Document.model_validate(doc.model_dump())
+    assert restored.frames[0].layerOverflow == {"base": {"-1,2": "#214f83ff"}}
+    doc.frames[0].layerOverflow["base"] = {"1,2": "#123"}
+    with pytest.raises(ValueError, match="越界像素格式无效"):
+        validate_images(doc)
+
+
+def test_checksum_preserves_legacy_documents_and_includes_overflow():
+    doc = document()
+    legacy = doc.model_dump(exclude={"provenance"})
+    for frame in legacy["frames"]:
+        frame.pop("layerOverflow")
+        frame["pixels"] = {key: hashlib.sha256(decode_image(value).tobytes()).hexdigest() for key, value in frame["pixels"].items()}
+    expected = hashlib.sha256(json.dumps(legacy, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    assert checksum(doc) == expected
+    doc.frames[0].layerOverflow = {"base": {"-1,2": "#214f83ff"}}
+    assert checksum(doc) != expected
 
 
 def test_transparent_rgb_does_not_count_and_disabled_does_not_report():

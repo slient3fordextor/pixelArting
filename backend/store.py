@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .images import checksum, validate_images
 from .models import AiConfigUpdate, AiGeneration, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, AiProviderConfig, CheckConfig, Document
+from .secrets import SecretStore
 
 
 def _document_api_payload(document: Document) -> dict:
@@ -45,6 +46,7 @@ class Store:
         root.mkdir(parents=True, exist_ok=True)
         self.root = root
         self.db = root / "pixelart.sqlite3"
+        self.secrets = SecretStore()
         with self.connection() as connection:
             connection.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -54,10 +56,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), version_id TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS previews (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), base_version TEXT NOT NULL, document TEXT NOT NULL, checksum TEXT NOT NULL, actions TEXT NOT NULL, config TEXT NOT NULL, result_version TEXT, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS project_configs (project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE, config TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS library_entries (id TEXT PRIMARY KEY, source_asset_id TEXT NOT NULL, source_version_id TEXT NOT NULL, project_name TEXT NOT NULL, name TEXT NOT NULL, document TEXT NOT NULL, checksum TEXT NOT NULL, created TEXT NOT NULL, UNIQUE(source_asset_id, source_version_id));
                 CREATE TABLE IF NOT EXISTS ai_provider_config (id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL, updated TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ai_provider_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, config TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ai_provider_state (id INTEGER PRIMARY KEY CHECK(id=1), active_id TEXT NOT NULL REFERENCES ai_provider_profiles(id));
-                CREATE TABLE IF NOT EXISTS ai_generations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE, mode TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL, provider_config TEXT);
+                CREATE TABLE IF NOT EXISTS ai_generations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE, mode TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL, provider_config TEXT, provider_secret TEXT);
                 CREATE TABLE IF NOT EXISTS ai_candidate_selections (generation_id TEXT NOT NULL REFERENCES ai_generations(id) ON DELETE CASCADE, candidate_id TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL, PRIMARY KEY(generation_id,candidate_id,project_id));
                 CREATE INDEX IF NOT EXISTS reports_asset_created ON reports(asset_id, created DESC);
                 CREATE INDEX IF NOT EXISTS ai_generations_project_created ON ai_generations(project_id, created DESC);
@@ -71,10 +74,13 @@ class Store:
             generation_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ai_generations)")}
             if "provider_config" not in generation_columns:
                 connection.execute("ALTER TABLE ai_generations ADD COLUMN provider_config TEXT")
+            if "provider_secret" not in generation_columns:
+                connection.execute("ALTER TABLE ai_generations ADD COLUMN provider_secret TEXT")
             # The first release stored one provider config in ai_provider_config.
             # Keep that table for old clients, but migrate it into the profile
             # store exactly once and make the migrated profile active.
             self._migrate_ai_profiles(connection)
+        self._migrate_ai_secrets()
 
     def _migrate_ai_profiles(self, connection):
         row = connection.execute("SELECT id FROM ai_provider_profiles ORDER BY created LIMIT 1").fetchone()
@@ -112,6 +118,67 @@ class Store:
         finally:
             connection.close()
 
+    @staticmethod
+    def _secret_name(profile_id: str) -> str:
+        return f"ai-profile:{profile_id}"
+
+    def _profile_config(self, row) -> AiProviderConfig:
+        try:
+            config = AiProviderConfig.model_validate_json(row["config"])
+        except ValueError as error:
+            raise ValueError("AI 配置损坏，请重新保存配置") from error
+        secret = self.secrets.get(self._secret_name(row["id"]))
+        if secret:
+            config = config.model_copy(update={"apiKey": secret})
+        return config
+
+    def _config_for_storage_name(self, secret_name: str, config: AiProviderConfig) -> AiProviderConfig:
+        if config.apiKey and self.secrets.set(secret_name, config.apiKey):
+            return config.model_copy(update={"apiKey": None})
+        if not config.apiKey:
+            self.secrets.delete(secret_name)
+        return config
+
+    def _config_for_storage(self, profile_id: str, config: AiProviderConfig) -> AiProviderConfig:
+        return self._config_for_storage_name(self._secret_name(profile_id), config)
+
+    def _migrate_ai_secrets(self):
+        with self.connection() as conn:
+            rows = conn.execute("SELECT id,config FROM ai_provider_profiles").fetchall()
+            active = conn.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
+            legacy = conn.execute("SELECT config FROM ai_provider_config WHERE id=1").fetchone()
+            for row in rows:
+                try:
+                    config = AiProviderConfig.model_validate_json(row["config"])
+                except ValueError:
+                    continue
+                stored = self._config_for_storage(row["id"], config) if config.apiKey else config
+                if stored.model_dump_json() != row["config"]:
+                    conn.execute("UPDATE ai_provider_profiles SET config=?,updated=? WHERE id=?", (stored.model_dump_json(), now(), row["id"]))
+                if active and active["active_id"] == row["id"] and legacy:
+                    conn.execute("UPDATE ai_provider_config SET config=?,updated=? WHERE id=1", (stored.model_dump_json(), now()))
+                    legacy = None
+            if legacy and active:
+                try:
+                    config = AiProviderConfig.model_validate_json(legacy["config"])
+                except ValueError:
+                    config = None
+                if config is not None:
+                    stored = self._config_for_storage(active["active_id"], config) if config.apiKey else config
+                    conn.execute("UPDATE ai_provider_config SET config=?,updated=? WHERE id=1", (stored.model_dump_json(), now()))
+            generations = conn.execute("SELECT id,provider_config,provider_secret FROM ai_generations WHERE provider_config IS NOT NULL").fetchall()
+            for generation in generations:
+                try:
+                    config = AiProviderConfig.model_validate_json(generation["provider_config"])
+                except ValueError:
+                    continue
+                if not config.apiKey:
+                    continue
+                secret_name = generation["provider_secret"] or f"ai-generation:{generation['id']}"
+                stored = self._config_for_storage_name(secret_name, config)
+                persisted_secret = secret_name if stored.apiKey is None else None
+                conn.execute("UPDATE ai_generations SET provider_config=?,provider_secret=? WHERE id=?", (stored.model_dump_json(), persisted_secret, generation["id"]))
+
     def project(self, name: str) -> dict:
         project = {"id": uid(), "name": name, "created": now()}
         with self.connection() as conn:
@@ -144,17 +211,11 @@ class Store:
     def ai_config(self) -> AiProviderConfig:
         """Return a copy of the currently active provider configuration."""
         row = self._active_profile_row()
-        try:
-            return AiProviderConfig.model_validate_json(row["config"])
-        except ValueError as error:
-            raise ValueError("AI 配置损坏，请重新保存配置") from error
+        return self._profile_config(row)
 
     def ai_config_profile(self) -> dict:
         row = self._active_profile_row()
-        try:
-            config = AiProviderConfig.model_validate_json(row["config"])
-        except ValueError as error:
-            raise ValueError("AI 配置损坏，请重新保存配置") from error
+        config = self._profile_config(row)
         return self._profile_public(row["id"], row["name"], config, row["created"], row["updated"])
 
     @staticmethod
@@ -185,22 +246,23 @@ class Store:
                 raise ValueError("AI 配置名称不能为空")
             if name is not None and conn.execute("SELECT id FROM ai_provider_profiles WHERE name=? COLLATE NOCASE AND id<>?", (name.strip(), profile_id)).fetchone():
                 raise Conflict("AI 配置名称已存在")
+            stored_config = self._config_for_storage(profile_id, config)
             conn.execute(
                 "UPDATE ai_provider_profiles SET name=?,config=?,updated=? WHERE id=?",
-                (profile_name.strip(), config.model_dump_json(), updated, profile_id),
+                (profile_name.strip(), stored_config.model_dump_json(), updated, profile_id),
             )
             # Keep the legacy single-profile row synchronized for old clients.
             active = conn.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
             if active and active["active_id"] == profile_id:
                 conn.execute(
                     "INSERT INTO ai_provider_config(id,config,updated) VALUES (1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated",
-                    (config.model_dump_json(), updated),
+                    (stored_config.model_dump_json(), updated),
                 )
         for suffix in ("-wal", "-shm"):
             sidecar = Path(str(self.db) + suffix)
             if sidecar.exists():
                 sidecar.chmod(0o600)
-        return self._profile_public(profile_id, profile_name.strip(), config, row["created"], updated)
+        return self._profile_public(profile_id, profile_name.strip(), self._profile_config({"id": profile_id, "config": stored_config.model_dump_json()}), row["created"], updated)
 
     def list_ai_profiles(self) -> dict:
         with self.connection() as conn:
@@ -209,7 +271,7 @@ class Store:
         profiles = []
         for row in rows:
             try:
-                config = AiProviderConfig.model_validate_json(row["config"])
+                config = self._profile_config(row)
             except ValueError as error:
                 raise ValueError("AI 配置损坏，请重新保存配置") from error
             profiles.append(self._profile_public(row["id"], row["name"], config, row["created"], row["updated"]))
@@ -223,6 +285,7 @@ class Store:
             fields["apiKey"] = None
         config = AiProviderConfig.model_validate({**AiProviderConfig().model_dump(), **fields})
         profile_id, created = uid(), now()
+        stored_config = self._config_for_storage(profile_id, config)
         name = body.name.strip()
         with self.connection() as conn:
             if conn.execute("SELECT id FROM ai_provider_profiles WHERE name=? COLLATE NOCASE", (name,)).fetchone():
@@ -230,9 +293,9 @@ class Store:
             count = conn.execute("SELECT COUNT(*) FROM ai_provider_profiles").fetchone()[0]
             if count >= 32:
                 raise Conflict("AI 配置档案数量已达到上限")
-            conn.execute("INSERT INTO ai_provider_profiles VALUES(?,?,?,?,?)", (profile_id, name, config.model_dump_json(), created, created))
+            conn.execute("INSERT INTO ai_provider_profiles VALUES(?,?,?,?,?)", (profile_id, name, stored_config.model_dump_json(), created, created))
         self.db.chmod(0o600)
-        return self._profile_public(profile_id, name, config, created, created)
+        return self._profile_public(profile_id, name, self._profile_config({"id": profile_id, "config": stored_config.model_dump_json()}), created, created)
 
     def update_ai_profile(self, profile_id: str, body: AiProfileUpdate) -> dict:
         with self.connection() as conn:
@@ -240,7 +303,7 @@ class Store:
         if not row:
             raise KeyError("AI 配置档案不存在")
         try:
-            current = AiProviderConfig.model_validate_json(row["config"])
+            current = self._profile_config({"id": profile_id, "config": row["config"]})
         except ValueError as error:
             raise ValueError("AI 配置损坏，请重新保存配置") from error
         fields = body.model_dump(exclude_none=True, exclude={"name", "clearApiKey"})
@@ -258,9 +321,11 @@ class Store:
                 raise KeyError("AI 配置档案不存在")
             conn.execute("INSERT INTO ai_provider_state(id,active_id) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET active_id=excluded.active_id", (profile_id,))
             profile = conn.execute("SELECT * FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
-            conn.execute("INSERT INTO ai_provider_config(id,config,updated) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated", (profile["config"], now()))
-        config = AiProviderConfig.model_validate_json(profile["config"])
-        return {"activeId": profile_id, "profile": self._profile_public(profile_id, profile["name"], config, profile["created"], profile["updated"])}
+            config = self._profile_config(profile)
+            stored_config = self._config_for_storage(profile_id, config)
+            conn.execute("UPDATE ai_provider_profiles SET config=? WHERE id=?", (stored_config.model_dump_json(), profile_id))
+            conn.execute("INSERT INTO ai_provider_config(id,config,updated) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated", (stored_config.model_dump_json(), now()))
+        return {"activeId": profile_id, "profile": self._profile_public(profile_id, profile["name"], self._profile_config({"id": profile_id, "config": stored_config.model_dump_json()}), profile["created"], profile["updated"])}
 
     def delete_ai_profile(self, profile_id: str):
         with self.connection() as conn:
@@ -286,9 +351,10 @@ class Store:
                     (next_profile["config"], now()),
                 )
             conn.execute("DELETE FROM ai_provider_profiles WHERE id=?", (profile_id,))
+        self.secrets.delete(self._secret_name(profile_id))
         result = {"deleted": True, "id": profile_id}
         if next_profile is not None:
-            config = AiProviderConfig.model_validate_json(next_profile["config"])
+            config = self._profile_config(next_profile)
             result.update({
                 "activeId": next_profile["id"],
                 "profile": self._profile_public(next_profile["id"], next_profile["name"], config, next_profile["created"], next_profile["updated"]),
@@ -297,7 +363,10 @@ class Store:
 
     def create_generation(self, request: AiGenerationRequest, provider_config: AiProviderConfig | None = None) -> AiGeneration:
         generation_id, created = uid(), now()
-        provider_json = provider_config.model_dump_json() if provider_config is not None else None
+        requested_secret = f"ai-generation:{generation_id}" if provider_config is not None and provider_config.apiKey else None
+        stored_config = self._config_for_storage_name(requested_secret, provider_config) if provider_config is not None and requested_secret else provider_config
+        provider_secret = requested_secret if stored_config is not None and stored_config.apiKey is None else None
+        provider_json = stored_config.model_dump_json() if stored_config is not None else None
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             count = conn.execute("SELECT COUNT(*) FROM ai_generations WHERE status IN ('queued','running')").fetchone()[0]
@@ -306,20 +375,23 @@ class Store:
             if request.projectId is not None and not conn.execute("SELECT id FROM projects WHERE id=?", (request.projectId,)).fetchone():
                 raise KeyError("项目不存在")
             conn.execute(
-                "INSERT INTO ai_generations (id,project_id,mode,status,request,result,error,created,updated,provider_config) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (generation_id, request.projectId, request.mode, "queued", request.model_dump_json(), None, None, created, created, provider_json),
+                "INSERT INTO ai_generations (id,project_id,mode,status,request,result,error,created,updated,provider_config,provider_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (generation_id, request.projectId, request.mode, "queued", request.model_dump_json(), None, None, created, created, provider_json, provider_secret),
             )
         return self.generation(generation_id)
 
     def generation_config(self, generation_id: str) -> AiProviderConfig | None:
         with self.connection() as conn:
-            row = conn.execute("SELECT provider_config FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
+            row = conn.execute("SELECT provider_config,provider_secret FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
         if not row or not row["provider_config"]:
             return None
         try:
-            return AiProviderConfig.model_validate_json(row["provider_config"])
+            config = AiProviderConfig.model_validate_json(row["provider_config"])
         except ValueError as error:
             raise ValueError("AI 任务配置损坏，请重新生成") from error
+        if row["provider_secret"]:
+            config = config.model_copy(update={"apiKey": self.secrets.get(row["provider_secret"])})
+        return config
 
     def select_ai_candidate(self, generation_id: str, candidate_id: str, project_id: str, document: Document):
         validate_images(document)
@@ -396,12 +468,15 @@ class Store:
         return self.generation(generation_id)
 
     def recover_generations(self):
-        """A process restart cannot resume an in-flight provider request."""
+        """Put interrupted work back into the durable queue for the executor."""
         with self.connection() as conn:
-            conn.execute(
-                "UPDATE ai_generations SET status='failed',error=?,updated=? WHERE status IN ('queued','running')",
-                ("应用已重启，任务中断；请重新生成", now()),
-            )
+            rows = conn.execute("SELECT id FROM ai_generations WHERE status IN ('queued','running') ORDER BY created,rowid").fetchall()
+            if rows:
+                conn.execute(
+                    "UPDATE ai_generations SET status='queued',error=NULL,updated=? WHERE status IN ('queued','running')",
+                    (now(),),
+                )
+            return [row["id"] for row in rows]
 
     def list_projects(self):
         with self.connection() as conn:
@@ -422,6 +497,7 @@ class Store:
             return {**dict(row), "name": name}
 
     def delete_project(self, project_id: str, expected_name: str, expected_versions: dict[str, str]):
+        generation_secrets = []
         with self.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             project = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -434,10 +510,13 @@ class Store:
                 raise Conflict("项目素材或版本已变化，请刷新后重新确认删除")
             for table in ("previews", "reports", "versions"):
                 conn.execute(f"DELETE FROM {table} WHERE asset_id IN (SELECT id FROM assets WHERE project_id=?)", (project_id,))
+            generation_secrets = [row["provider_secret"] for row in conn.execute("SELECT provider_secret FROM ai_generations WHERE project_id=? AND provider_secret IS NOT NULL", (project_id,))]
             conn.execute("DELETE FROM assets WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM project_configs WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM ai_generations WHERE project_id=?", (project_id,))
             conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        for secret_name in generation_secrets:
+            self.secrets.delete(secret_name)
 
     def project_config(self, project_id: str) -> CheckConfig:
         with self.connection() as conn:
@@ -484,6 +563,67 @@ class Store:
                 item.update(frameCount=len(document["frames"]), layerCount=len(document["layers"]), width=document["frames"][0]["width"], height=document["frames"][0]["height"])
                 result.append(item)
             return result
+
+    def list_library_assets(self):
+        """List only explicitly collected snapshots, independent of projects."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT id,name,source_asset_id AS sourceAssetId,source_version_id AS versionId,"
+                "project_name AS projectName,checksum,created,document FROM library_entries ORDER BY created DESC,id"
+            )
+            result = []
+            for row in rows:
+                item = dict(row)
+                document = json.loads(item.pop("document"))
+                item.update(
+                    frameCount=len(document["frames"]),
+                    layerCount=len(document["layers"]),
+                    width=document["frames"][0]["width"],
+                    height=document["frames"][0]["height"],
+                )
+                result.append(item)
+            return result
+
+    def collect_asset(self, asset_id: str, expected: str):
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT a.current_version,a.name,p.name AS project_name,v.document,v.checksum "
+                "FROM assets a JOIN projects p ON p.id=a.project_id "
+                "JOIN versions v ON v.id=a.current_version AND v.asset_id=a.id WHERE a.id=?", (asset_id,),
+            ).fetchone()
+            if not row:
+                raise KeyError("素材不存在")
+            if row["current_version"] != expected:
+                raise Conflict("当前版本已变化，请刷新后再加入素材库")
+            existing = conn.execute("SELECT id FROM library_entries WHERE source_asset_id=? AND source_version_id=?", (asset_id, expected)).fetchone()
+            entry_id = existing["id"] if existing else uid()
+            if not existing:
+                conn.execute("INSERT INTO library_entries VALUES (?,?,?,?,?,?,?,?)", (entry_id, asset_id, expected, row["project_name"], row["name"], row["document"], row["checksum"], now()))
+        return {"id": entry_id, "sourceAssetId": asset_id, "versionId": expected}
+
+    def library_entry(self, entry_id: str):
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM library_entries WHERE id=?", (entry_id,)).fetchone()
+        if not row:
+            raise KeyError("素材库条目不存在")
+        return dict(row)
+
+    def remove_library_entry(self, entry_id: str, expected: str):
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT source_version_id FROM library_entries WHERE id=?", (entry_id,)).fetchone()
+            if not row:
+                raise KeyError("素材库条目不存在")
+            if row["source_version_id"] != expected:
+                raise Conflict("素材库版本不匹配，请刷新后重试")
+            conn.execute("DELETE FROM library_entries WHERE id=?", (entry_id,))
+
+    def reuse_library_entry(self, project_id: str, entry_id: str):
+        entry = self.library_entry(entry_id)
+        document = Document.model_validate_json(entry["document"])
+        document.provenance["libraryEntryId"] = entry_id
+        return self.copy_asset(project_id, document, entry["source_asset_id"], entry["source_version_id"])
 
     def delete_asset(self, asset_id: str, expected: str):
         with self.connection() as conn:

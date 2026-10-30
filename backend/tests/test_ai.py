@@ -13,7 +13,8 @@ from backend.ai import AiProviderError, OpenAICompatibleProvider
 from backend.ai_candidates import _image_bytes, _pixelate
 from backend.app import create_app
 from backend.images import decode_image, png_bytes
-from backend.models import AiGenerationRequest, AiProviderConfig
+from backend.models import AiGenerationRequest, AiProfileCreate, AiProviderConfig
+import backend.secrets as secrets
 from backend.store import Conflict, GenerationQueueFull, Store
 
 
@@ -84,6 +85,47 @@ def test_config_key_never_echoed_and_persists_without_env(tmp_path, monkeypatch)
         assert client.get("/api/ai/config").json()["textModel"] == "changed"
         assert client.get("/api/ai/config").json()["hasApiKey"] is True
         assert client.put("/api/ai/config", json={"clearApiKey": True}).json()["hasApiKey"] is False
+
+
+def test_connection_probe_checks_both_models_without_persisting_changes(client):
+    configure(client)
+    captured = []
+
+    def handle(request):
+        captured.append(request)
+        return httpx.Response(200, json={})
+
+    client.app.state.ai_provider_factory = lambda config: OpenAICompatibleProvider(config, transport=httpx.MockTransport(handle))
+    response = client.post("/api/ai/test-connection", json={"baseUrl": "https://temporary.example/v1", "textModel": "probe-text", "imageModel": "probe-image"})
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["ok"] is True
+    assert all(item["status"] == "passed" for item in payload["checks"].values())
+    assert len(captured) == 2
+    assert {request.url.path for request in captured} == {"/v1/chat/completions", "/v1/images/generations"}
+    assert all(request.headers["Authorization"] == "Bearer " + KEY for request in captured)
+    assert client.get("/api/ai/config").json()["baseUrl"] == "https://provider.example/v1"
+    assert KEY not in response.text
+
+
+def test_connection_probe_validation_redacts_api_key(client):
+    response = client.post("/api/ai/test-connection", json={"apiKey": {"secret": KEY}})
+    assert response.status_code == 422
+    assert KEY not in response.text
+    assert "input" not in response.text
+
+
+@pytest.mark.parametrize(("status", "body", "category"), [
+    (401, b"", "auth_error"), (404, b'{"error":"model does not exist"}', "model_not_found"),
+    (404, b'{"error":"route not found"}', "unsupported_interface"), (405, b"", "unsupported_interface"),
+    (429, b"", "rate_limited"), (500, b"", "transient_error"),
+])
+def test_provider_connection_error_categories(status, body, category):
+    provider = OpenAICompatibleProvider(AiProviderConfig(apiKey=KEY), transport=httpx.MockTransport(lambda request: httpx.Response(status, content=body)))
+    with pytest.raises(AiProviderError) as raised:
+        provider._post("chat/completions", {"model": "probe"})
+    assert raised.value.category == category
+    assert KEY not in str(raised.value)
 
 
 @pytest.mark.parametrize("body", [
@@ -177,6 +219,24 @@ def test_failed_provider_cannot_leak_key(client):
     assert KEY not in json.dumps(task)
 
 
+def test_transient_provider_failure_retries_with_bounded_backoff(client, monkeypatch):
+    configure(client)
+    calls = []
+
+    class FlakyProvider(DrawingProvider):
+        def generate_text(self, request):
+            calls.append(1)
+            if len(calls) < 3:
+                raise AiProviderError("临时失败", "transient_error")
+            return drawing_result()
+
+    monkeypatch.setattr("backend.app.time.sleep", lambda seconds: None)
+    client.app.state.ai_provider_factory = FlakyProvider
+    task = wait_task(client, generate(client, width=8, height=8)["id"])
+    assert task["status"] == "succeeded"
+    assert len(calls) == 3
+
+
 @pytest.mark.parametrize("key", [KEY, 'sk-test"x', "sk-test\\path"])
 def test_result_cannot_leak_key(client, key):
     configure(client, key)
@@ -223,9 +283,9 @@ def test_image_candidate_preserves_source_and_pixelates(client):
     assert selected.json()["asset"]["document"]["provenance"]["originalRef"] == candidate["source"]["originalRef"]
 
 
-def test_restart_fails_interrupted_tasks_and_queue_is_bounded(tmp_path):
+def test_restart_resumes_interrupted_tasks_and_queue_is_bounded(tmp_path):
     store = Store(tmp_path)
-    request = AiGenerationRequest(mode="agent_draw", prompt="图标")
+    request = AiGenerationRequest(mode="agent_draw", prompt="图标", width=8, height=8)
     queued = store.create_generation(request)
     running = store.create_generation(request)
     store.update_generation(running.id, "running")
@@ -233,10 +293,11 @@ def test_restart_fails_interrupted_tasks_and_queue_is_bounded(tmp_path):
         store.create_generation(request)
     with pytest.raises(GenerationQueueFull):
         store.create_generation(request)
-    with TestClient(create_app(tmp_path)) as client:
-        assert client.get(f"/api/ai/generations/{queued.id}").json()["status"] == "failed"
-        assert client.get(f"/api/ai/generations/{running.id}").json()["status"] == "failed"
-        assert "重启" in client.get(f"/api/ai/generations/{running.id}").json()["error"]
+    app = create_app(tmp_path)
+    app.state.ai_provider_factory = DrawingProvider
+    with TestClient(app) as client:
+        assert wait_task(client, queued.id)["status"] == "succeeded"
+        assert wait_task(client, running.id)["status"] == "succeeded"
 
 
 def test_ai_profiles_crud_activation_and_legacy_config(client):
@@ -297,6 +358,58 @@ def test_old_single_profile_row_is_migrated(tmp_path):
     assert profiles["activeId"] == "default"
     assert profiles["profiles"][0]["hasApiKey"] is True
     assert KEY not in json.dumps(profiles)
+
+
+def test_api_keys_migrate_to_keyring_and_are_not_kept_in_sqlite(tmp_path, monkeypatch):
+    class FakeKeyring:
+        values = {}
+
+        def get_password(self, service, username):
+            return self.values.get((service, username))
+
+        def set_password(self, service, username, password):
+            self.values[(service, username)] = password
+
+        def delete_password(self, service, username):
+            self.values.pop((service, username), None)
+
+    fake = FakeKeyring()
+    monkeypatch.setattr(secrets, "_keyring", fake)
+    first = Store(tmp_path)
+    with first.connection() as conn:
+        conn.execute("DELETE FROM ai_provider_state")
+        conn.execute("DELETE FROM ai_provider_profiles")
+        conn.execute("UPDATE ai_provider_config SET config=?,updated=? WHERE id=1", (AiProviderConfig(apiKey=KEY).model_dump_json(), "legacy"))
+    migrated = Store(tmp_path)
+    assert migrated.ai_config().apiKey == KEY
+    with migrated.connection() as conn:
+        rows = conn.execute("SELECT config FROM ai_provider_profiles UNION ALL SELECT config FROM ai_provider_config").fetchall()
+    assert KEY not in json.dumps([row["config"] for row in rows])
+    assert fake.values[("PixelArting", "ai-profile:default")] == KEY
+
+
+def test_new_api_key_is_written_to_keyring_before_profile_response(tmp_path, monkeypatch):
+    class FakeKeyring:
+        values = {}
+        def get_password(self, service, username): return self.values.get((service, username))
+        def set_password(self, service, username, password): self.values[(service, username)] = password
+        def delete_password(self, service, username): self.values.pop((service, username), None)
+
+    fake = FakeKeyring()
+    monkeypatch.setattr(secrets, "_keyring", fake)
+    store = Store(tmp_path)
+    profile = store.create_ai_profile(AiProfileCreate(name="钥匙串档案", apiKey=KEY))
+    assert profile["hasApiKey"] is True
+    with store.connection() as conn:
+        row = conn.execute("SELECT config FROM ai_provider_profiles WHERE id=?", (profile["id"],)).fetchone()
+    assert KEY not in row["config"]
+    assert fake.values[("PixelArting", f"ai-profile:{profile['id']}")] == KEY
+    generation = store.create_generation(AiGenerationRequest(mode="agent_draw", prompt="任务"), AiProviderConfig(apiKey=KEY))
+    with store.connection() as conn:
+        row = conn.execute("SELECT provider_config,provider_secret FROM ai_generations WHERE id=?", (generation.id,)).fetchone()
+    assert KEY not in row["provider_config"]
+    assert row["provider_secret"] == f"ai-generation:{generation.id}"
+    assert store.generation_config(generation.id).apiKey == KEY
 
 
 def test_generation_uses_provider_snapshot_when_active_profile_changes(client):

@@ -190,6 +190,7 @@ function profileFixture(id: string, name: string, textModel: string, imageModel:
 
 async function mockProfiles(page: import('@playwright/test').Page) {
   const profiles = [profileFixture('profile-a', 'OpenAI 主档案', 'text-a', 'image-a'), profileFixture('profile-b', '本地模型', 'text-b', 'image-b')];
+  const updates: Record<string, unknown>[] = [];
   let activeId = profiles[0].id;
   let sequence = 0;
   await page.route('**/api/ai/profiles', async route => {
@@ -219,6 +220,7 @@ async function mockProfiles(page: import('@playwright/test').Page) {
     }
     if (route.request().method() === 'PUT') {
       const body = route.request().postDataJSON();
+      updates.push(body);
       Object.assign(profile, body);
       if (body.clearApiKey) profile.hasApiKey = false;
       if (body.apiKey) profile.hasApiKey = true;
@@ -227,7 +229,7 @@ async function mockProfiles(page: import('@playwright/test').Page) {
     }
     return route.fulfill({ status: 405, json: { detail: 'method not allowed' } });
   });
-  return { profiles, get activeId() { return activeId; } };
+  return { profiles, updates, get activeId() { return activeId; } };
 }
 
 async function selectProfile(page: import('@playwright/test').Page, profileName: string) {
@@ -294,6 +296,31 @@ test('AI model profiles create and delete the current profile', async ({ page, r
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toBeDisabled();
   await expect(page.getByRole('button', { name: '删除当前模型档案（至少保留一个，暂不可删除）' })).toHaveAttribute('title', '至少保留一个模型档案，当前档案不可删除');
+});
+
+test('AI model profiles can be renamed without changing connection settings', async ({ page, request }) => {
+  const fixture = await mockProfiles(page);
+  await page.route('**/api/ai/generations*', route => route.fulfill({ json: [] }));
+  const projectResponse = await request.post('/api/projects', { data: { name: 'AI 档案重命名项目' } });
+  const project = await projectResponse.json();
+  await page.goto('/');
+  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.getByRole('button', { name: 'AI 生成', exact: true }).click();
+  await page.locator('.ai-settings > summary').click();
+  const nameInput = page.getByLabel('AI 档案名称');
+  const renameButton = page.getByRole('button', { name: '保存档案名称' });
+  await expect(renameButton).toBeDisabled();
+  await nameInput.fill('重命名后的服务');
+  await expect(renameButton).toBeEnabled();
+  await renameButton.click();
+  expect(fixture.updates.at(-1)).toEqual({ name: '重命名后的服务' });
+  await expect(nameInput).toHaveValue('重命名后的服务');
+  await expect(page.getByRole('combobox', { name: 'AI 模型档案' })).toContainText('重命名后的服务');
+  await expect(renameButton).toBeDisabled();
+  await nameInput.fill('回车提交的服务');
+  await nameInput.press('Enter');
+  expect(fixture.updates.at(-1)).toEqual({ name: '回车提交的服务' });
+  await expect(nameInput).toHaveValue('回车提交的服务');
 });
 
 test('AI model profile API key clearing stays scoped to the active profile', async ({ page, request }) => {

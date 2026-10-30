@@ -108,6 +108,54 @@ def test_create_blank_asset_and_validate_dimensions(client):
     assert client.post("/api/projects/missing/assets/blank", json={}).status_code == 404
 
 
+def test_library_only_collects_explicit_snapshots_and_survives_source_project_deletion(client):
+    source_project = client.post("/api/projects", json={"name": "素材来源项目"}).json()
+    target_project = client.post("/api/projects", json={"name": "复用目标项目"}).json()
+    source = client.post(f'/api/projects/{source_project["id"]}/assets/blank', json={"name": "可复用角色", "width": 16, "height": 16}).json()
+    # Creating, uploading and copying all remain ordinary project work.
+    uploaded = upload(client).json()
+    client.post(f'/api/projects/{target_project["id"]}/assets/copy', json={"sourceAssetId": uploaded["id"]})
+    assert client.get("/api/assets/library").json() == []
+
+    document = source["document"]
+    document["layers"][0]["locked"] = True
+    document["frames"][0]["pixels"]["base"] = encode_image(Image.new("RGBA", (16, 16), (1, 2, 3, 255)))
+    source = client.post(f'/api/assets/{source["id"]}/save', json={"expectedCurrentVersionId": source["currentVersionId"], "document": document}).json()
+    path = f'/api/assets/{source["id"]}/library'
+    assert client.post(path, json={"expectedCurrentVersionId": "stale"}).status_code == 409
+    assert client.get("/api/assets/library").json() == []
+    body = {"expectedCurrentVersionId": source["currentVersionId"]}
+    collected = client.post(path, json=body)
+    assert collected.status_code == 201
+    entry = collected.json()
+    assert client.post(path, json=body).json()["id"] == entry["id"]
+    library = client.get("/api/assets/library").json()
+    assert len(library) == 1
+    assert library[0]["sourceAssetId"] == source["id"]
+    assert library[0]["projectName"] == "素材来源项目"
+    assert (library[0]["width"], library[0]["height"], library[0]["frameCount"]) == (16, 16, 1)
+    assert "document" not in library[0]
+
+    # Later saves and deletions never mutate the collected snapshot.
+    document["frames"][0]["pixels"]["base"] = encode_image(Image.new("RGBA", (16, 16), (9, 8, 7, 255)))
+    updated = client.post(f'/api/assets/{source["id"]}/save', json={**body, "document": document}).json()
+    assert client.request("DELETE", f'/api/projects/{source_project["id"]}', json={"expectedName": source_project["name"], "expectedCurrentVersions": {source["id"]: updated["currentVersionId"]}}).status_code == 200
+    thumbnail = client.get(f'/api/library/{entry["id"]}/thumbnail')
+    assert thumbnail.status_code == 200
+    assert Image.open(io.BytesIO(thumbnail.content)).getpixel((0, 0)) == (1, 2, 3, 255)
+    copied = client.post(f'/api/projects/{target_project["id"]}/library/{entry["id"]}/use').json()
+    assert copied["projectId"] == target_project["id"]
+    assert copied["document"]["layers"][0]["locked"] is True
+    assert copied["document"]["frames"][0]["pixels"]["base"] == source["document"]["frames"][0]["pixels"]["base"]
+    assert copied["document"]["provenance"]["libraryEntryId"] == entry["id"]
+    assert len(client.get("/api/assets/library").json()) == 1
+    assert client.request("DELETE", f'/api/library/{entry["id"]}', json={"expectedCurrentVersionId": "stale"}).status_code == 409
+    assert client.request("DELETE", f'/api/library/{entry["id"]}', json=body).status_code == 200
+    assert client.get("/api/assets/library").json() == []
+    assert client.get(f'/api/assets/{copied["id"]}').status_code == 200
+    assert client.post(f'/api/projects/{target_project["id"]}/library/{entry["id"]}/use').status_code == 404
+
+
 def test_thumbnail_and_asset_deletion_are_versioned_and_isolated(client):
     first, second = upload(client, Image.new("RGBA", (128, 64), (255, 0, 0, 255))).json(), upload(client).json()
     path = f'/api/assets/{first["id"]}'

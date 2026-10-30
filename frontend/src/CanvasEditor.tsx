@@ -78,7 +78,9 @@ type Props = {
   label?: string;
   finding?: Finding | null;
   difference?: Rect | null;
-  onChange?: (image: string) => void;
+  onChange?: (image: string, layerOverflow?: Record<string, string>) => void;
+  layerOverflow?: Record<string, string>;
+  layerOverflows?: Record<string, Record<string, string>>;
   onPickColor?: (color: string, opacity?: number) => void;
   onZoomChange?: (zoom: number) => void;
   onSelectionChange?: (selection: Rect | null) => void;
@@ -140,6 +142,25 @@ function contentBounds(image: ImageData): Rect | null {
   return right < 0 ? null : { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
 }
 
+function contentBoundsWithOverflow(image: ImageData, overflow: Record<string, string>): Rect | null {
+  const bounds = contentBounds(image);
+  let result = bounds ? { ...bounds } : null;
+  for (const key of Object.keys(overflow)) {
+    const [x, y] = key.split(',').map(Number);
+    if (!Number.isInteger(x) || !Number.isInteger(y)) continue;
+    result = result
+      ? { x: Math.min(result.x, x), y: Math.min(result.y, y), width: Math.max(result.x + result.width - 1, x) - Math.min(result.x, x) + 1, height: Math.max(result.y + result.height - 1, y) - Math.min(result.y, y) + 1 }
+      : { x, y, width: 1, height: 1 };
+  }
+  return result;
+}
+
+function storedToRgba(value: string): [number, number, number, number] | null {
+  const normalized = value.replace('#', '').trim();
+  if (!/^[0-9a-fA-F]{8}$/.test(normalized)) return null;
+  return [0, 2, 4, 6].map(index => Number.parseInt(normalized.slice(index, index + 2), 16)) as [number, number, number, number];
+}
+
 export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function CanvasEditor(props, ref) {
   const {
     frame,
@@ -179,6 +200,8 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     onClipboardChange,
     onStrokeStateChange,
     onFrameMetadataChange,
+    layerOverflow = {},
+    layerOverflows = {},
     label = '像素编辑画布',
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -196,6 +219,10 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
   const moveBuffer = useRef<HTMLCanvasElement | null>(null);
   const moveBounds = useRef<Rect | null>(null);
   const moveStart = useRef<Point | null>(null);
+  const moveDelta = useRef<Point>([0, 0]);
+  const moveSnapshot = useRef<ImageData | null>(null);
+  const moveOverflow = useRef<Record<string, string>>({});
+  const [movePreview, setMovePreview] = useState<Record<string, string> | null>(null);
   const changed = useRef(false);
   const ready = useRef(false);
   const drawRef = useRef<() => void>(() => {});
@@ -716,13 +743,40 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     context.putImageData(image, 0, 0);
     return true;
   }
-  function emitChange() {
+  function emitChange(nextOverflow: Record<string, string> = layerOverflow) {
     const image = sourceRef.current.get(activeLayer);
     if (image) {
       const source = image.toDataURL('image/png');
       sourceFiles.current.set(activeLayer, source);
-      onChange?.(source);
+      onChange?.(source, nextOverflow);
     }
+  }
+
+  function commitLayerMove(dx: number, dy: number) {
+    const source = moveSnapshot.current;
+    const context = sourceRef.current.get(activeLayer)?.getContext('2d');
+    if (!source || !context) return undefined;
+    const output = new ImageData(frame.width, frame.height);
+    const overflow: Record<string, string> = {};
+    const put = (x: number, y: number, rgba: [number, number, number, number]) => {
+      if (rgba[3] === 0) return;
+      if (x >= 0 && y >= 0 && x < frame.width && y < frame.height) {
+        const offset = (y * frame.width + x) * 4;
+        output.data.set(rgba, offset);
+      } else overflow[`${x},${y}`] = `#${rgba.map(value => value.toString(16).padStart(2, '0')).join('')}`;
+    };
+    for (let y = 0; y < source.height; y++) for (let x = 0; x < source.width; x++) {
+      const offset = (y * source.width + x) * 4;
+      put(x + dx, y + dy, [source.data[offset], source.data[offset + 1], source.data[offset + 2], source.data[offset + 3]]);
+    }
+    for (const [key, value] of Object.entries(moveOverflow.current)) {
+      const [x, y] = key.split(',').map(Number);
+      const rgba = storedToRgba(value);
+      if (rgba && Number.isInteger(x) && Number.isInteger(y)) put(x + dx, y + dy, rgba);
+    }
+    context.putImageData(output, 0, 0);
+    drawRef.current();
+    return overflow;
   }
   function paint(event: PointerEvent<HTMLCanvasElement>) {
     const point = position(event);
@@ -770,10 +824,10 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
       const bounds = moveBounds.current;
       const pointer = moveStart.current;
       if (buffer && bounds && pointer) {
-        const dx = Math.max(-bounds.x, Math.min(frame.width - bounds.x - bounds.width, Math.round((event.clientX - pointer[0]) / zoom)));
-        const dy = Math.max(-bounds.y, Math.min(frame.height - bounds.y - bounds.height, Math.round((event.clientY - pointer[1]) / zoom)));
-        context.clearRect(0, 0, frame.width, frame.height);
-        context.drawImage(buffer, dx, dy);
+        const dx = Math.round((event.clientX - pointer[0]) / zoom);
+        const dy = Math.round((event.clientY - pointer[1]) / zoom);
+        moveDelta.current = [dx, dy];
+        setMovePreview(commitLayerMove(dx, dy) ?? null);
         changed.current = dx !== 0 || dy !== 0;
       }
     } else if (tool === 'pencil' || tool === 'eraser') {
@@ -837,16 +891,21 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     brushStroke.current = null;
     shapePointer.current = null;
     snapshot.current = null;
+    let nextOverflow: Record<string, string> | undefined;
+    if (!cancelled && tool === 'move-layer' && changed.current) nextOverflow = commitLayerMove(moveDelta.current[0], moveDelta.current[1]);
     moveBuffer.current = null;
     moveBounds.current = null;
     moveStart.current = null;
+    moveSnapshot.current = null;
+    moveOverflow.current = {};
+    setMovePreview(null);
     selectionMoving.current = false;
     selectionSnapshot.current = null;
     selectionMoveBuffer.current = null;
     selectionMoveStart.current = null;
     selectionMoveOrigin.current = null;
     start.current = null;
-    if (changed.current) emitChange();
+    if (changed.current) emitChange(nextOverflow);
     changed.current = false;
   }
   useEffect(() => {
@@ -912,6 +971,17 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
           backgroundSize: backgroundStyle === 'checker' ? `${checkerSize}px ${checkerSize}px` : 'auto',
         }}
       >
+        <div className="overflow-pixels" aria-hidden="true">{layers.flatMap(layer => {
+          if (!layer.visible || !layer.opacity) return [];
+          const pixels = layer.id === activeLayer && movePreview !== null ? movePreview : layerOverflows[layer.id] || {};
+          return Object.entries(pixels).map(([key, value]) => {
+            const rgba = storedToRgba(value);
+            if (!rgba || rgba[3] === 0) return null;
+            const [x, y] = key.split(',').map(Number);
+            if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
+            return <span key={`${layer.id}:${key}`} className="overflow-pixel" style={{ left: x * zoom, top: y * zoom, width: zoom, height: zoom, mixBlendMode: layer.blendMode || 'normal', backgroundColor: `rgba(${rgba[0]}, ${rgba[1]}, ${rgba[2]}, ${(rgba[3] / 255) * (layer.opacity / 255)})` }} />;
+          });
+        })}</div>
         <canvas ref={onionRef} width={frame.width} height={frame.height} className="onion-overlay" aria-label="洋葱皮预览画布" />
         <canvas
           ref={canvasRef}
@@ -1001,8 +1071,11 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
             changed.current = false;
             if (tool === 'move-layer') {
               const pixels = context.getImageData(0, 0, frame.width, frame.height);
-              moveBounds.current = contentBounds(pixels);
+              moveSnapshot.current = pixels;
+              moveOverflow.current = structuredClone(layerOverflow);
+              moveBounds.current = contentBoundsWithOverflow(pixels, moveOverflow.current);
               moveStart.current = [event.clientX, event.clientY];
+              moveDelta.current = [0, 0];
               const buffer = document.createElement('canvas');
               buffer.width = frame.width;
               buffer.height = frame.height;

@@ -70,6 +70,11 @@ function command(name) {
 function menu() {
   return Menu.buildFromTemplate([
     { label: '文件', submenu: [
+      { label: '新建项目', accelerator: 'CmdOrCtrl+Shift+N', click: () => command('new-project') },
+      { label: '切换项目…', click: () => command('project-switcher') },
+      { label: '项目设置', click: () => command('project-settings') },
+      { type: 'separator' },
+      { label: '素材库', accelerator: 'CmdOrCtrl+Shift+O', click: () => command('asset-library') },
       { label: '新建素材', accelerator: 'CmdOrCtrl+N', click: () => command('new-asset') },
       { label: '导入素材', accelerator: 'CmdOrCtrl+O', click: () => command('open') },
       { label: '保存版本', accelerator: 'CmdOrCtrl+S', click: () => command('save') },
@@ -98,7 +103,7 @@ function menu() {
       { label: '移动图层', accelerator: 'V', registerAccelerator: false, click: () => command('tool:move-layer') },
     ] },
     { label: '窗口', submenu: [
-      ...Object.entries({ library: '项目栏', inspector: '检查器', tools: '工具栏', palette: '调色板', timeline: '时间轴' })
+      ...Object.entries({ library: '素材', inspector: '检查器', tools: '工具栏', palette: '调色板', timeline: '时间轴' })
         .map(([id, label]) => ({ label, click: () => command(`panel:${id}`) })),
       { type: 'separator' }, { label: '恢复默认工作区', click: () => command('workspace:reset') },
       { type: 'separator' }, { role: 'minimize', label: '最小化' }, { role: 'togglefullscreen', label: '全屏' },

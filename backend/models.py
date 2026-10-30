@@ -35,6 +35,7 @@ class Frame(Model):
     width: int = Field(gt=0, le=512)
     height: int = Field(gt=0, le=512)
     pixels: dict[str, str]
+    layerOverflow: dict[str, dict[str, str]] = Field(default_factory=dict)
     origin: Point | None = None
     baselineY: int | None = None
     collisionRects: list[Rect] = Field(default_factory=list, max_length=32)
@@ -72,6 +73,8 @@ class Document(Model):
         for frame in self.frames:
             if set(frame.pixels) != set(layer_ids):
                 raise ValueError("每帧必须包含所有图层的图像")
+            if set(frame.layerOverflow) - set(layer_ids):
+                raise ValueError("越界像素引用了不存在的图层")
         pairs = [(a.action, a.direction) for a in self.animations]
         if len(set(pairs)) != len(pairs):
             raise ValueError("动作与方向组合不能重复")
