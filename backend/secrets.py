@@ -13,6 +13,10 @@ except ImportError:  # pragma: no cover - exercised by minimal installations
 class SecretStore:
     service = "PixelArting"
 
+    def __init__(self, namespace: str | None = None):
+        if namespace is not None:
+            self.service = f'PixelArting:workspace:{namespace}'
+
     def get(self, key: str) -> str | None:
         if _keyring is None:
             return None

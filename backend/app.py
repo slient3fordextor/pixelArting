@@ -1,7 +1,6 @@
+import asyncio
 import os
 import re
-import time
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -14,12 +13,13 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from .ai import AiProviderError, OpenAICompatibleProvider, contains_sensitive_string
+from .ai import OpenAICompatibleProvider
+from .generation_service import GenerationNotConfigured, GenerationService
 from .exports import export_bundle
 from .exchange import MAX_ARCHIVE_BYTES, MAX_EXPANDED_BYTES, MAX_PROJECT_ASSETS, export_project, import_bundle, import_project
 from .images import MAX_UPLOAD_BYTES, composite, encode_image, png_bytes
 from .imports import SheetLayout, imported_document, preview_import, retain_png
-from .models import AiCandidateSelect, AiConfigUpdate, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
+from .models import AiCandidateSelect, AiCandidateState, AiConfigUpdate, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, BlankAssetCreate, CheckConfig, CheckRequest, CommitRequest, CopyAssetRequest, DeleteAssetRequest, DeleteProjectRequest, Document, Frame, Layer, PreviewRequest, ProjectCreate, RenameAssetRequest, RenameProjectRequest, RestoreRequest, SaveRequest
 from .quality import inspect
 from .repairs import repair
 from .sample import sample_document
@@ -30,25 +30,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def create_app(data_root: Path | None = None):
     store = Store(data_root or Path(os.environ.get("PIXELART_DATA_DIR", ROOT / "data")))
-    executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pixelart-ai")
-
     @asynccontextmanager
     async def lifespan(application):
-        for generation_id in store.recover_generations():
-            try:
-                config = store.generation_config(generation_id) or store.ai_config()
-                executor.submit(run_generation, generation_id, config)
-            except (KeyError, ValueError):
-                try:
-                    store.update_generation(generation_id, "failed", error="任务配置损坏，请重新生成")
-                except (KeyError, Conflict):
-                    pass
-        yield
-        executor.shutdown(wait=True, cancel_futures=True)
+        generations.start()
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(generations.stop)
 
     app = FastAPI(title="PixelArting", version="0.1.0", lifespan=lifespan)
     app.state.store = store
     app.state.ai_provider_factory = OpenAICompatibleProvider
+    generations = GenerationService(store, provider_factory=lambda config: app.state.ai_provider_factory(config))
+    app.state.generations = generations
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, error):
@@ -150,66 +144,14 @@ def create_app(data_root: Path | None = None):
     def activate_ai_profile(profile_id: str):
         return store.activate_ai_profile(profile_id)
 
-    def run_generation(generation_id: str, config):
-        try:
-            generation = store.update_generation(generation_id, "running")
-            if generation.status == "cancelled":
-                return
-            # The provider settings are snapshotted at enqueue time. This keeps
-            # switching the active profile from changing an in-flight request.
-            config = store.generation_config(generation_id) or config
-            provider = app.state.ai_provider_factory(config)
-            generate = provider.generate_text if generation.mode == "agent_draw" else provider.generate_image
-            result = None
-            for attempt in range(3):
-                try:
-                    result = generate(generation.request)
-                    break
-                except AiProviderError as error:
-                    if error.category not in {"rate_limited", "timeout", "address_error", "transient_error"} or attempt == 2:
-                        raise
-                    if store.generation(generation_id).status == "cancelled":
-                        return
-                    time.sleep(2 ** attempt)
-            if result is None:
-                raise AiProviderError("AI 生成失败，请稍后重试")
-            if store.generation(generation_id).status == "cancelled":
-                return
-            if config.apiKey and contains_sensitive_string(result, config.apiKey):
-                raise AiProviderError("AI 服务结果包含敏感信息，已拒绝保存")
-            from .ai_candidates import prepare_candidates
-            result = prepare_candidates(result, generation.request, store.root, config.requestTimeoutSeconds)
-            store.update_generation(generation_id, "succeeded", result=result)
-        except AiProviderError as error:
-            detail = str(error)
-            if config.apiKey and config.apiKey in detail:
-                detail = "AI 服务请求失败，请检查配置后重试"
-            try:
-                store.update_generation(generation_id, "failed", error=detail)
-            except (KeyError, Conflict):
-                pass
-        except KeyError:
-            # Deleting a project also deletes its pending generation records.
-            return
-        except Exception:
-            # Unexpected adapter errors must never expose credentials or raw
-            # provider response bodies through the stored task error.
-            try:
-                store.update_generation(generation_id, "failed", error="AI 生成失败，请检查配置后重试")
-            except (KeyError, Conflict):
-                pass
-
     @app.post("/api/ai/generations", status_code=202)
     def create_ai_generation(body: AiGenerationRequest):
-        config = store.ai_config()
-        if not config.apiKey:
-            raise HTTPException(409, "尚未配置 AI API Key，请在 AI 设置中填写")
         try:
-            generation = store.create_generation(body, config)
+            return generations.submit(body)
+        except GenerationNotConfigured as error:
+            raise HTTPException(409, str(error)) from error
         except GenerationQueueFull as error:
             raise HTTPException(429, str(error)) from error
-        executor.submit(run_generation, generation.id, config)
-        return generation
 
     @app.get("/api/ai/generations")
     def ai_generations(projectId: str | None = None, status: Literal["queued", "running", "succeeded", "failed", "cancelled"] | None = None, limit: int = Query(default=50, ge=1, le=100)):
@@ -221,7 +163,7 @@ def create_app(data_root: Path | None = None):
 
     @app.post("/api/ai/generations/{generation_id}/cancel")
     def cancel_ai_generation(generation_id: str):
-        return store.update_generation(generation_id, "cancelled")
+        return generations.cancel(generation_id)
 
     @app.post("/api/ai/generations/{generation_id}/retry", status_code=202)
     def retry_ai_generation(generation_id: str):
@@ -243,23 +185,13 @@ def create_app(data_root: Path | None = None):
             raise KeyError("候选原图不存在")
         return Response(source.read_bytes(), media_type="image/png")
 
+    @app.post("/api/ai/generations/{generation_id}/candidates/{candidate_id}/state")
+    def update_ai_candidate_state(generation_id: str, candidate_id: str, body: AiCandidateState):
+        return store.update_candidate_state(generation_id, candidate_id, body.favorite, body.discarded)
+
     @app.post("/api/ai/generations/{generation_id}/select", status_code=201)
     def select_ai_candidate(generation_id: str, body: AiCandidateSelect):
-        generation = store.generation(generation_id)
-        if generation.status != "succeeded" or generation.result is None:
-            raise Conflict("AI 任务尚未成功，无法导入候选")
-        project_id = body.projectId or generation.projectId
-        if not project_id:
-            raise HTTPException(422, "导入候选需要选择项目")
-        candidates = generation.result.get("candidates", [])
-        candidate = next((item for item in candidates if item.get("id") == body.candidateId), None)
-        if candidate is None:
-            raise KeyError("AI 候选不存在")
-        document = Document.model_validate(candidate["document"])
-        if body.name:
-            document.name = body.name
-        document.provenance.update({"kind": "ai", "mode": generation.mode, "generationId": generation.id, "candidateId": body.candidateId, "model": generation.result.get("model"), "prompt": generation.request.prompt})
-        return {"asset": store.select_ai_candidate(generation.id, body.candidateId, project_id, document)}
+        return {"asset": generations.import_candidate(generation_id, body)}
 
     @app.get("/api/projects")
     def projects():

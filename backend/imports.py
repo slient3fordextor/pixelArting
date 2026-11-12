@@ -1,5 +1,7 @@
 import hashlib
+import os
 from pathlib import Path
+import tempfile
 from typing import Literal
 
 from PIL import Image
@@ -37,7 +39,18 @@ def retain_png(root: Path, data: bytes) -> tuple[Image.Image, str]:
     source_dir.mkdir(exist_ok=True)
     source = source_dir / f"{digest}.png"
     if not source.exists():
-        source.write_bytes(data)
+        # A second importer must never observe a partially written source.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=source_dir, delete=False) as pending:
+                temporary = Path(pending.name)
+                pending.write(data)
+                pending.flush()
+                os.fsync(pending.fileno())
+            os.replace(temporary, source)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
     return image, digest
 
 

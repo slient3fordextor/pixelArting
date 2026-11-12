@@ -468,16 +468,38 @@ select.full { margin-bottom: 10px; }
 .ai-task { margin-top: 16px; border-top: 1px solid #e4e9e8; padding-top: 13px; }
 .ai-task > div:first-child { display: flex; align-items: center; gap: 9px; }
 .ai-task > div:first-child small { margin-left: auto; overflow-wrap: anywhere; }
-.ai-candidates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
-.ai-candidate { min-width: 0; border: 1px solid #dfe5e3; border-radius: 5px; padding: 8px; background: #fbfcfc; }
+.ai-candidates-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 12px; color: #4d625e; font-size: 11px; }
+.ai-candidates-heading span { color: #87938f; font-size: 10px; }
+.ai-candidates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 7px; }
+.ai-candidate { min-width: 0; border: 1px solid #dfe5e3; border-radius: 7px; padding: 8px; background: #fbfcfc; }
+.ai-candidate.is-favorite { border-color: #d5ad52; box-shadow: 0 0 0 2px #d5ad5224; }
+.ai-candidate.is-discarded { opacity: .58; background: #f1f3f3; }
+.ai-candidate-preview { position: relative; display: block; width: 100%; padding: 0; border: 0; border-radius: 4px; overflow: hidden; cursor: zoom-in; }
+.ai-candidate-preview:disabled { cursor: progress; }
 .ai-candidate img, .ai-command-preview { display: block; width: 100%; aspect-ratio: 1; object-fit: contain; image-rendering: pixelated; background: conic-gradient(#e8ebee 25%, #fff 0 50%, #e8ebee 0 75%, #fff 0) 0 0 / 12px 12px; }
+.ai-preview-hint { position: absolute; right: 5px; bottom: 5px; display: inline-flex; align-items: center; gap: 3px; padding: 3px 5px; border-radius: 4px; color: #fff; background: #213832b8; font-size: 9px; opacity: 0; transition: opacity .15s ease; }
+.ai-candidate-preview:hover .ai-preview-hint, .ai-candidate-preview:focus-visible .ai-preview-hint { opacity: 1; }
 .ai-command-preview { padding: 9px; overflow: hidden; color: #53635f; font-size: 10px; }
 .ai-command-preview span { display: block; margin-top: 3px; color: #8b9894; }
 .ai-command-preview pre { max-height: 75px; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; margin: 7px 0 0; font-size: 8px; }
+.ai-candidate-title { display: flex; align-items: baseline; gap: 6px; margin-top: 7px; color: #58706a; font-size: 10px; }
+.ai-candidate-title span { color: #9aa49f; font-size: 9px; overflow-wrap: anywhere; }
 .ai-candidate p { min-height: 28px; margin: 7px 0; color: #71807a; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.ai-candidate-meta { display: grid; gap: 3px; margin: 0 0 8px; padding: 6px; border-radius: 4px; background: #f1f6f4; color: #6f7d79; font-size: 9px; }
+.ai-candidate-meta div { display: grid; grid-template-columns: 37px minmax(0, 1fr); gap: 5px; }
+.ai-candidate-meta dt { color: #96a09d; }
+.ai-candidate-meta dd { margin: 0; overflow-wrap: anywhere; }
 .ai-candidate .button { width: 100%; min-height: 30px; padding: 5px 7px; font-size: 11px; }
 .ai-candidate-actions { display: flex; align-items: center; gap: 4px; }
 .ai-candidate-actions .button { flex: 1; width: auto; }
+.ai-candidate-actions .icon-button { flex: 0 0 30px; width: 30px; height: 30px; }
+.ai-candidate-actions .icon-button.is-active { color: #a67418; background: #fff5d8; border-color: #e7c979; }
+.ai-candidate-viewer { position: absolute; inset: 0; z-index: 10; display: grid; place-items: center; padding: 24px; background: #172b27a8; }
+.ai-candidate-viewer-card { width: min(620px, 100%); max-height: 100%; overflow: auto; padding: 13px; border: 1px solid #c8d8d2; border-radius: 9px; background: #fff; box-shadow: 0 18px 55px #122c2538; }
+.ai-candidate-viewer-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; color: #49645d; font-size: 12px; }
+.ai-candidate-viewer-card img, .ai-candidate-viewer-card pre { display: block; width: 100%; max-height: min(64vh, 560px); object-fit: contain; image-rendering: pixelated; border-radius: 5px; background: conic-gradient(#e8ebee 25%, #fff 0 50%, #e8ebee 0 75%, #fff 0) 0 0 / 16px 16px; }
+.ai-candidate-viewer-card pre { overflow: auto; padding: 12px; color: #53635f; font-size: 10px; white-space: pre-wrap; }
+.ai-candidate-viewer-card p { margin: 9px 0 0; color: #71807a; font-size: 11px; }
 .ai-notice, .ai-error, .ai-empty { margin: 11px 0 0; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .ai-notice.error, .ai-error { color: #a95b4f; }
 .ai-empty { color: #8a9691; }

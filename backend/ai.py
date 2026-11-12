@@ -6,6 +6,7 @@ called after a user has configured it through the application settings.
 
 import json
 import re
+import threading
 import time
 from typing import Any
 
@@ -130,23 +131,46 @@ class OpenAICompatibleProvider:
             transport=self.transport,
         )
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, path: str, payload: dict[str, Any], cancel_event: threading.Event | None = None) -> dict[str, Any]:
+        if cancel_event is not None and cancel_event.is_set():
+            raise AiProviderError("AI 生成已取消", "cancelled")
         try:
-            with self._client() as client:
+            client = self._client()
+            with client:
                 deadline = time.monotonic() + self.config.requestTimeoutSeconds
                 with client.stream("POST", path, json=payload) as response:
-                    response.raise_for_status()
-                    chunks, size = [], 0
-                    for chunk in response.iter_bytes():
-                        if time.monotonic() > deadline:
-                            raise AiProviderError("AI 服务请求超时，请稍后重试")
-                        size += len(chunk)
-                        if size > MAX_PROVIDER_BYTES:
-                            raise AiProviderError("AI 服务返回内容超过 32 MB 上限")
-                        chunks.append(chunk)
-                    value = json.loads(b"".join(chunks))
+                    watcher_stop = threading.Event()
+                    if cancel_event is not None:
+                        def close_on_cancel():
+                            while not watcher_stop.wait(0.05):
+                                if cancel_event.is_set():
+                                    response.close()
+                                    return
+                        watcher = threading.Thread(target=close_on_cancel, name="pixelart-ai-cancel", daemon=True)
+                        watcher.start()
+                    else:
+                        watcher = None
+                    try:
+                        response.raise_for_status()
+                        chunks, size = [], 0
+                        for chunk in response.iter_bytes():
+                            if cancel_event is not None and cancel_event.is_set():
+                                raise AiProviderError("AI 生成已取消", "cancelled")
+                            if time.monotonic() > deadline:
+                                raise AiProviderError("AI 服务请求超时，请稍后重试", "timeout")
+                            size += len(chunk)
+                            if size > MAX_PROVIDER_BYTES:
+                                raise AiProviderError("AI 服务返回内容超过 32 MB 上限")
+                            chunks.append(chunk)
+                        value = json.loads(b"".join(chunks))
+                    finally:
+                        watcher_stop.set()
         except AiProviderError:
             raise
+        except (httpx.ReadError, httpx.WriteError) as error:
+            if cancel_event is not None and cancel_event.is_set():
+                raise AiProviderError("AI 生成已取消", "cancelled") from error
+            raise AiProviderError("AI 服务请求失败，请检查服务地址、模型和网络", "address_error") from error
         except httpx.HTTPStatusError as error:
             messages = {
                 401: "AI 服务身份验证失败，请检查 API Key",
@@ -183,7 +207,7 @@ class OpenAICompatibleProvider:
             raise AiProviderError("AI 服务返回格式无效")
         return value
 
-    def generate_text(self, request: AiGenerationRequest) -> dict[str, Any]:
+    def generate_text(self, request: AiGenerationRequest, cancel_event: threading.Event | None = None) -> dict[str, Any]:
         model = request.model or self.config.textModel
         payload = {
             "model": model,
@@ -228,7 +252,7 @@ class OpenAICompatibleProvider:
                 },
             ],
         }
-        body = self._post("chat/completions", payload)
+        body = self._post("chat/completions", payload, cancel_event)
         try:
             choice = body["choices"][0]
             content = _json_content(choice["message"]["content"])
@@ -243,7 +267,7 @@ class OpenAICompatibleProvider:
             "candidates": [candidate.model_dump() for candidate in candidates],
         }
 
-    def generate_image(self, request: AiGenerationRequest) -> dict[str, Any]:
+    def generate_image(self, request: AiGenerationRequest, cancel_event: threading.Event | None = None) -> dict[str, Any]:
         model = request.model or self.config.imageModel
         payload = {
             "model": model,
@@ -253,7 +277,7 @@ class OpenAICompatibleProvider:
         }
         if self.config.sendImageBackground:
             payload["background"] = "transparent" if request.transparentBackground else "opaque"
-        body = self._post("images/generations", payload)
+        body = self._post("images/generations", payload, cancel_event)
         data = body.get("data")
         if not isinstance(data, list) or not data:
             raise AiProviderError("图像模型没有返回候选图片")

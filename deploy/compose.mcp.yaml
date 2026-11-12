@@ -1,0 +1,28 @@
+# Linux host networking preserves the service's loopback-only listener.
+# This file requires Docker Compose v2; it does not configure a public TLS proxy.
+services:
+  pixelarting:
+    image: ${PIXELART_MCP_IMAGE:?Set PIXELART_MCP_IMAGE to the tested image tag or digest}
+    init: true
+    network_mode: host
+    read_only: true
+    user: "${PIXELART_MCP_UID:-65532}:${PIXELART_MCP_GID:-65532}"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - ${PIXELART_MCP_DATA:?Set an absolute workspace directory}:/data
+      - ${PIXELART_MCP_CONFIG:?Set an absolute OAuth configuration directory}:/config:ro
+    command:
+      - --transport
+      - streamable-http
+      - --host
+      - 127.0.0.1
+      - --port
+      - "${PIXELART_MCP_PORT:-8765}"
+      - --oauth-config
+      - /config/oauth.json
+      - "${PIXELART_MCP_PERMISSION:---read-only}"
+    restart: unless-stopped
+    stop_grace_period: 30s

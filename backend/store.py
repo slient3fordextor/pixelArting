@@ -1,5 +1,8 @@
+import hashlib
 import json
+import re
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -37,6 +40,10 @@ class Conflict(Exception):
     pass
 
 
+class IdempotencyConflict(Conflict):
+    pass
+
+
 class GenerationQueueFull(Exception):
     pass
 
@@ -46,11 +53,12 @@ class Store:
         root.mkdir(parents=True, exist_ok=True)
         self.root = root
         self.db = root / "pixelart.sqlite3"
-        self.secrets = SecretStore()
+        self._transaction = threading.local()
         with self.connection() as connection:
             connection.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, created TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS workspace_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, current_version TEXT, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), parent TEXT, operation TEXT NOT NULL, document TEXT NOT NULL, checksum TEXT NOT NULL, created TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL REFERENCES assets(id), version_id TEXT NOT NULL, body TEXT NOT NULL, created TEXT NOT NULL);
@@ -60,11 +68,18 @@ class Store:
                 CREATE TABLE IF NOT EXISTS ai_provider_config (id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL, updated TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ai_provider_profiles (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE, config TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS ai_provider_state (id INTEGER PRIMARY KEY CHECK(id=1), active_id TEXT NOT NULL REFERENCES ai_provider_profiles(id));
-                CREATE TABLE IF NOT EXISTS ai_generations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE, mode TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL, provider_config TEXT, provider_secret TEXT);
+                CREATE TABLE IF NOT EXISTS ai_generations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id) ON DELETE CASCADE, mode TEXT NOT NULL, status TEXT NOT NULL, request TEXT NOT NULL, result TEXT, error TEXT, created TEXT NOT NULL, updated TEXT NOT NULL, provider_config TEXT, provider_secret TEXT, provider_profile_id TEXT);
                 CREATE TABLE IF NOT EXISTS ai_candidate_selections (generation_id TEXT NOT NULL REFERENCES ai_generations(id) ON DELETE CASCADE, candidate_id TEXT NOT NULL, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL, PRIMARY KEY(generation_id,candidate_id,project_id));
+                CREATE TABLE IF NOT EXISTS ai_generation_requests (request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, generation_id TEXT REFERENCES ai_generations(id) ON DELETE SET NULL);
+                CREATE TABLE IF NOT EXISTS file_import_requests (request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, asset_id TEXT REFERENCES assets(id) ON DELETE SET NULL, version_id TEXT NOT NULL, name TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS project_import_requests (request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, project_id TEXT REFERENCES projects(id) ON DELETE SET NULL, receipt TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS mcp_write_requests (request_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, operation TEXT NOT NULL, response TEXT NOT NULL, resource_refs TEXT NOT NULL, created TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS reports_asset_created ON reports(asset_id, created DESC);
                 CREATE INDEX IF NOT EXISTS ai_generations_project_created ON ai_generations(project_id, created DESC);
             """)
+            connection.execute("INSERT OR IGNORE INTO workspace_metadata VALUES('credential_namespace',?)", (uid(),))
+            namespace = connection.execute("SELECT value FROM workspace_metadata WHERE key='credential_namespace'").fetchone()['value']
+            self.secrets = SecretStore(namespace)
             # Backfill defaults without changing any existing project data.
             default_config = json.dumps(CheckConfig().model_dump(), ensure_ascii=False)
             connection.execute(
@@ -72,15 +87,39 @@ class Store:
                 (default_config,),
             )
             generation_columns = {row["name"] for row in connection.execute("PRAGMA table_info(ai_generations)")}
+            if "revision" not in generation_columns:
+                connection.execute("ALTER TABLE ai_generations ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
             if "provider_config" not in generation_columns:
                 connection.execute("ALTER TABLE ai_generations ADD COLUMN provider_config TEXT")
             if "provider_secret" not in generation_columns:
                 connection.execute("ALTER TABLE ai_generations ADD COLUMN provider_secret TEXT")
+            if "provider_profile_id" not in generation_columns:
+                connection.execute("ALTER TABLE ai_generations ADD COLUMN provider_profile_id TEXT")
             # The first release stored one provider config in ai_provider_config.
             # Keep that table for old clients, but migrate it into the profile
             # store exactly once and make the migrated profile active.
             self._migrate_ai_profiles(connection)
+        self._migrate_legacy_keyring_namespace()
         self._migrate_ai_secrets()
+
+    def _migrate_legacy_keyring_namespace(self):
+        """UUID-backed references can be attributed; global 'default' cannot."""
+        with self.connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            if connection.execute("SELECT value FROM workspace_metadata WHERE key='legacy_keyring_migrated'").fetchone():
+                return
+            references = [self._secret_name(row['id']) for row in connection.execute('SELECT id FROM ai_provider_profiles')
+                          if re.fullmatch(r'[0-9a-f]{32}', row['id'])]
+            references.extend(row['provider_secret'] for row in connection.execute('SELECT provider_secret FROM ai_generations WHERE provider_secret IS NOT NULL')
+                              if re.fullmatch(r'ai-generation:[0-9a-f]{32}', row['provider_secret']))
+            legacy = SecretStore()
+            for reference in references:
+                if self.secrets.get(reference) is None:
+                    secret = legacy.get(reference)
+                    if secret:
+                        self.secrets.set(reference, secret)
+            # Never fall back on later reads: clearing a key must stay cleared.
+            connection.execute("INSERT INTO workspace_metadata VALUES('legacy_keyring_migrated','1')")
 
     def _migrate_ai_profiles(self, connection):
         row = connection.execute("SELECT id FROM ai_provider_profiles ORDER BY created LIMIT 1").fetchone()
@@ -109,6 +148,13 @@ class Store:
 
     @contextmanager
     def connection(self):
+        borrowed = getattr(self._transaction, 'connection', None)
+        if borrowed is not None:
+            # A synchronous MCP write owns the transaction; nested Store calls
+            # must neither commit nor close its connection. Never share it with
+            # another thread or a different Store instance.
+            yield borrowed
+            return
         connection = sqlite3.connect(self.db, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
@@ -117,6 +163,50 @@ class Store:
                 yield connection
         finally:
             connection.close()
+
+    @staticmethod
+    def _begin_immediate(connection):
+        if not connection.in_transaction:
+            connection.execute('BEGIN IMMEDIATE')
+
+    @staticmethod
+    def _check_write_references(connection, references):
+        tables = {'project': 'projects', 'asset': 'assets', 'version': 'versions',
+                  'preview': 'previews', 'report': 'reports', 'generation': 'ai_generations'}
+        for kind, resource_id in references:
+            table = tables[kind]
+            if not connection.execute(f'SELECT 1 FROM {table} WHERE id=?', (resource_id,)).fetchone():
+                raise IdempotencyConflict('An original write resource was deleted')
+
+    def mcp_write_once(self, operation, request_key, fingerprint, apply):
+        """Atomically execute a local DB write and persist its response/identity.
+
+        apply returns (JSON response, resource references), and must raise on
+        failure. Only synchronous, database-only operations belong here. OAuth
+        admission/confirmation happens before this method, including replays.
+        """
+        self._validate_import_key(request_key, fingerprint)
+        if getattr(self._transaction, 'connection', None) is not None:
+            raise RuntimeError('Nested idempotent writes are not supported')
+        with self.connection() as connection:
+            self._begin_immediate(connection)
+            row = connection.execute('SELECT * FROM mcp_write_requests WHERE request_key=?', (request_key,)).fetchone()
+            if row is not None:
+                if row['operation'] != operation or row['fingerprint'] != fingerprint:
+                    raise IdempotencyConflict('Key belongs to another write request')
+                self._check_write_references(connection, json.loads(row['resource_refs']))
+                return json.loads(row['response'])
+            self._transaction.connection = connection
+            try:
+                response, references = apply()
+                self._check_write_references(connection, references)
+                connection.execute('INSERT INTO mcp_write_requests VALUES(?,?,?,?,?,?)',
+                                   (request_key, fingerprint, operation,
+                                    json.dumps(response, ensure_ascii=False, allow_nan=False),
+                                    json.dumps(references), now()))
+            finally:
+                del self._transaction.connection
+        return response
 
     @staticmethod
     def _secret_name(profile_id: str) -> str:
@@ -212,6 +302,14 @@ class Store:
         """Return a copy of the currently active provider configuration."""
         row = self._active_profile_row()
         return self._profile_config(row)
+
+    def active_ai_profile_id(self) -> str:
+        row = self._active_profile_row()
+        return row["id"]
+
+    def ai_provider_snapshot(self) -> tuple[str, AiProviderConfig]:
+        row = self._active_profile_row()
+        return row["id"], self._profile_config(row)
 
     def ai_config_profile(self) -> dict:
         row = self._active_profile_row()
@@ -361,23 +459,49 @@ class Store:
             })
         return result
 
-    def create_generation(self, request: AiGenerationRequest, provider_config: AiProviderConfig | None = None) -> AiGeneration:
-        generation_id, created = uid(), now()
-        requested_secret = f"ai-generation:{generation_id}" if provider_config is not None and provider_config.apiKey else None
-        stored_config = self._config_for_storage_name(requested_secret, provider_config) if provider_config is not None and requested_secret else provider_config
-        provider_secret = requested_secret if stored_config is not None and stored_config.apiKey is None else None
-        provider_json = stored_config.model_dump_json() if stored_config is not None else None
+    @staticmethod
+    def _generation_fingerprint(request: AiGenerationRequest, request_key: str, operation: str) -> str:
+        if not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,128}", request_key):
+            raise ValueError("Invalid generation idempotency key")
+        payload = json.dumps({"operation": operation, "request": request.model_dump()}, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def generation_for_request(self, request: AiGenerationRequest, request_key: str, operation: str = "start") -> AiGeneration | None:
+        fingerprint = self._generation_fingerprint(request, request_key, operation)
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT fingerprint,generation_id FROM ai_generation_requests WHERE request_key=?", (request_key,)).fetchone()
+        if row is None:
+            return None
+        if row["fingerprint"] != fingerprint or row["generation_id"] is None:
+            raise IdempotencyConflict("幂等键已被不同请求使用或原任务已删除")
+        return self.generation(row["generation_id"])
+
+    def create_generation(self, request: AiGenerationRequest, provider_config: AiProviderConfig | None = None, provider_profile_id: str | None = None, *, request_key: str | None = None, operation: str = "start") -> AiGeneration:
+        generation_id, created = uid(), now()
+        fingerprint = self._generation_fingerprint(request, request_key, operation) if request_key is not None else None
+        with self.connection() as conn:
+            self._begin_immediate(conn)
+            if request_key is not None:
+                row = conn.execute("SELECT fingerprint,generation_id FROM ai_generation_requests WHERE request_key=?", (request_key,)).fetchone()
+                if row is not None:
+                    if row["fingerprint"] != fingerprint or row["generation_id"] is None:
+                        raise IdempotencyConflict("幂等键已被不同请求使用或原任务已删除")
+                    return self.generation(row["generation_id"])
             count = conn.execute("SELECT COUNT(*) FROM ai_generations WHERE status IN ('queued','running')").fetchone()[0]
             if count >= 32:
                 raise GenerationQueueFull("等待中的 AI 任务过多，请稍后重试")
             if request.projectId is not None and not conn.execute("SELECT id FROM projects WHERE id=?", (request.projectId,)).fetchone():
                 raise KeyError("项目不存在")
+            requested_secret = f"ai-generation:{generation_id}" if provider_config is not None and provider_config.apiKey else None
+            stored_config = self._config_for_storage_name(requested_secret, provider_config) if provider_config is not None and requested_secret else provider_config
+            provider_secret = requested_secret if stored_config is not None and stored_config.apiKey is None else None
+            provider_json = stored_config.model_dump_json() if stored_config is not None else None
             conn.execute(
-                "INSERT INTO ai_generations (id,project_id,mode,status,request,result,error,created,updated,provider_config,provider_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (generation_id, request.projectId, request.mode, "queued", request.model_dump_json(), None, None, created, created, provider_json, provider_secret),
+                "INSERT INTO ai_generations (id,project_id,mode,status,request,result,error,created,updated,provider_config,provider_secret,provider_profile_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (generation_id, request.projectId, request.mode, "queued", request.model_dump_json(), None, None, created, created, provider_json, provider_secret, provider_profile_id),
             )
+            if request_key is not None:
+                conn.execute("INSERT INTO ai_generation_requests VALUES (?,?,?)", (request_key, fingerprint, generation_id))
         return self.generation(generation_id)
 
     def generation_config(self, generation_id: str) -> AiProviderConfig | None:
@@ -393,11 +517,48 @@ class Store:
             config = config.model_copy(update={"apiKey": self.secrets.get(row["provider_secret"])})
         return config
 
+    def generation_profile_id(self, generation_id: str) -> str | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT provider_profile_id FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
+        if not row:
+            raise KeyError("AI 生成任务不存在")
+        return row["provider_profile_id"]
+
+    def update_candidate_state(self, generation_id: str, candidate_id: str, favorite: bool | None, discarded: bool | None):
+        with self.connection() as conn:
+            self._begin_immediate(conn)
+            row = conn.execute("SELECT status,result FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
+            if not row:
+                raise KeyError("AI 生成任务不存在")
+            if row["status"] != "succeeded" or row["result"] is None:
+                raise Conflict("AI 任务尚未成功，无法修改候选状态")
+            result = json.loads(row["result"])
+            candidates = result.get("candidates", [])
+            candidate = next((item for item in candidates if item.get("id") == candidate_id), None)
+            if candidate is None:
+                raise KeyError("AI 候选不存在")
+            before = (candidate.get("favorite", False), candidate.get("discarded", False))
+            if favorite is not None:
+                candidate["favorite"] = favorite
+                if favorite:
+                    candidate["discarded"] = False
+            if discarded is not None:
+                candidate["discarded"] = discarded
+                if discarded:
+                    candidate["favorite"] = False
+            if before == (candidate.get("favorite", False), candidate.get("discarded", False)):
+                return self.generation(generation_id)
+            conn.execute(
+                "UPDATE ai_generations SET result=?,updated=?,revision=revision+1 WHERE id=?",
+                (json.dumps(result, ensure_ascii=False), now(), generation_id),
+            )
+        return self.generation(generation_id)
+
     def select_ai_candidate(self, generation_id: str, candidate_id: str, project_id: str, document: Document):
         validate_images(document)
         asset_id, version_id = uid(), uid()
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             selected = conn.execute(
                 "SELECT asset_id FROM ai_candidate_selections WHERE generation_id=? AND candidate_id=? AND project_id=?",
                 (generation_id, candidate_id, project_id),
@@ -409,8 +570,14 @@ class Store:
             else:
                 if not conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
                     raise KeyError("项目不存在")
-                if not conn.execute("SELECT id FROM ai_generations WHERE id=? AND status='succeeded'", (generation_id,)).fetchone():
+                generation = conn.execute("SELECT result FROM ai_generations WHERE id=? AND status='succeeded'", (generation_id,)).fetchone()
+                if not generation:
                     raise Conflict("AI 任务无法导入")
+                candidate = next((item for item in json.loads(generation["result"]).get("candidates", []) if item.get("id") == candidate_id), None)
+                if candidate is None:
+                    raise KeyError("AI 候选不存在")
+                if candidate.get("discarded"):
+                    raise Conflict("已淘汰的候选不能导入")
                 imported = document.model_copy(deep=True)
                 imported.name = self._unique_name(conn, project_id, imported.name)
                 created = now()
@@ -426,6 +593,7 @@ class Store:
             request=AiGenerationRequest.model_validate_json(row["request"]),
             result=json.loads(row["result"]) if row["result"] is not None else None,
             error=row["error"], created=row["created"], updated=row["updated"],
+            revision=row["revision"],
         )
 
     def generation(self, generation_id: str) -> AiGeneration:
@@ -435,8 +603,13 @@ class Store:
             raise KeyError("AI 生成任务不存在")
         return self._generation(row)
 
-    def list_generations(self, project_id: str | None = None, status: str | None = None, limit: int = 50):
+    def list_generations(self, project_id: str | None = None, status: str | None = None, limit: int = 50, *, allowed_projects=None):
         clauses, values = [], []
+        if allowed_projects is not None:
+            if not allowed_projects:
+                return []
+            clauses.append('project_id IN (' + ','.join('?' for _ in allowed_projects) + ')')
+            values.extend(sorted(allowed_projects))
         if project_id is not None:
             clauses.append("project_id=?")
             values.append(project_id)
@@ -452,7 +625,7 @@ class Store:
         if status not in {"running", "succeeded", "failed", "cancelled"}:
             raise ValueError("无效的 AI 任务状态")
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute("SELECT status FROM ai_generations WHERE id=?", (generation_id,)).fetchone()
             if not row:
                 raise KeyError("AI 生成任务不存在")
@@ -462,7 +635,7 @@ class Store:
                     return self.generation(generation_id)
                 raise Conflict("AI 任务已结束，无法改变状态")
             conn.execute(
-                "UPDATE ai_generations SET status=?,result=?,error=?,updated=? WHERE id=?",
+                "UPDATE ai_generations SET status=?,result=?,error=?,updated=?,revision=revision+1 WHERE id=?",
                 (status, json.dumps(result, ensure_ascii=False) if result is not None else None, error, now(), generation_id),
             )
         return self.generation(generation_id)
@@ -473,7 +646,7 @@ class Store:
             rows = conn.execute("SELECT id FROM ai_generations WHERE status IN ('queued','running') ORDER BY created,rowid").fetchall()
             if rows:
                 conn.execute(
-                    "UPDATE ai_generations SET status='queued',error=NULL,updated=? WHERE status IN ('queued','running')",
+                    "UPDATE ai_generations SET status='queued',error=NULL,updated=?,revision=revision+1 WHERE status='running'",
                     (now(),),
                 )
             return [row["id"] for row in rows]
@@ -487,7 +660,7 @@ class Store:
         if not name or len(name) > 80:
             raise ValueError("项目名称必须为 1 到 80 个字符")
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
             if not row:
                 raise KeyError("项目不存在")
@@ -499,7 +672,7 @@ class Store:
     def delete_project(self, project_id: str, expected_name: str, expected_versions: dict[str, str]):
         generation_secrets = []
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             project = conn.execute("SELECT name FROM projects WHERE id=?", (project_id,)).fetchone()
             if not project:
                 raise KeyError("项目不存在")
@@ -586,7 +759,7 @@ class Store:
 
     def collect_asset(self, asset_id: str, expected: str):
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute(
                 "SELECT a.current_version,a.name,p.name AS project_name,v.document,v.checksum "
                 "FROM assets a JOIN projects p ON p.id=a.project_id "
@@ -611,7 +784,7 @@ class Store:
 
     def remove_library_entry(self, entry_id: str, expected: str):
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute("SELECT source_version_id FROM library_entries WHERE id=?", (entry_id,)).fetchone()
             if not row:
                 raise KeyError("素材库条目不存在")
@@ -627,7 +800,7 @@ class Store:
 
     def delete_asset(self, asset_id: str, expected: str):
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute("SELECT current_version FROM assets WHERE id=?", (asset_id,)).fetchone()
             if not row:
                 raise KeyError("素材不存在")
@@ -648,20 +821,65 @@ class Store:
             conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "upload", document.model_dump_json(), digest, now()))
         return self.asset(asset_id)
 
+    def _insert_import(self, conn, project_id: str, document: Document):
+        """Insert using the caller's transaction, shared by desktop and MCP imports."""
+        asset_id, version_id = uid(), uid()
+        if not conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise KeyError("项目不存在")
+        imported = document.model_copy(deep=True)
+        imported.name = self._unique_name(conn, project_id, imported.name)
+        digest = checksum(imported)
+        created = now()
+        conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project_id, imported.name, version_id, created))
+        conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "import", imported.model_dump_json(), digest, created))
+        return {"assetId": asset_id, "projectId": project_id, "versionId": version_id, "name": imported.name}
+
     def import_asset(self, project_id: str, document: Document):
         validate_images(document)
-        asset_id, version_id = uid(), uid()
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            if not conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
-                raise KeyError("项目不存在")
-            imported = document.model_copy(deep=True)
-            imported.name = self._unique_name(conn, project_id, imported.name)
-            digest = checksum(imported)
-            created = now()
-            conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project_id, imported.name, version_id, created))
-            conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "import", imported.model_dump_json(), digest, created))
-        return self.asset(asset_id)
+            self._begin_immediate(conn)
+            receipt = self._insert_import(conn, project_id, document)
+        return self.asset(receipt["assetId"])
+
+    @staticmethod
+    def _validate_import_key(request_key: str, fingerprint: str):
+        if not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,128}", request_key) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("Invalid file import idempotency key or fingerprint")
+
+    def _import_receipt(self, conn, project_id, request_key, fingerprint):
+        row = conn.execute("SELECT * FROM file_import_requests WHERE request_key=?", (request_key,)).fetchone()
+        if row is None:
+            return None
+        if row['fingerprint'] != fingerprint or row['asset_id'] is None or not conn.execute(
+            "SELECT 1 FROM assets a JOIN versions v ON v.asset_id=a.id WHERE a.id=? AND a.project_id=? AND v.id=?",
+            (row['asset_id'], project_id, row['version_id']),
+        ).fetchone():
+            raise IdempotencyConflict("导入请求已变化或原始素材/版本已删除")
+        return {"assetId": row['asset_id'], "projectId": project_id, "versionId": row['version_id'], "name": row['name'], "replayed": True}
+
+    def file_import_for_request(self, project_id: str, request_key: str, fingerprint: str):
+        self._validate_import_key(request_key, fingerprint)
+        with self.connection() as conn:
+            return self._import_receipt(conn, project_id, request_key, fingerprint)
+
+    def import_asset_once(self, project_id: str, document: Document, request_key: str, fingerprint: str):
+        """Atomically reserve a key with an immutable initial-version receipt.
+
+        Retain tombstones after deletion, so retries cannot recreate deleted assets.
+        The MCP adapter fingerprints canonical options and the uploaded byte digest.
+        """
+        self._validate_import_key(request_key, fingerprint)
+        validate_images(document)
+        with self.connection() as conn:
+            self._begin_immediate(conn)
+            previous = self._import_receipt(conn, project_id, request_key, fingerprint)
+            if previous is not None:
+                return previous
+            receipt = self._insert_import(conn, project_id, document)
+            conn.execute("INSERT INTO file_import_requests VALUES (?,?,?,?,?)", (
+                request_key, fingerprint, receipt['assetId'], receipt['versionId'], receipt['name'],
+            ))
+        return {**receipt, "replayed": False}
 
     def snapshot_project(self, project_id: str, max_assets: int, max_document_bytes: int):
         with self.connection() as conn:
@@ -688,20 +906,69 @@ class Store:
                 assets.append({"id": asset["id"], "currentVersionId": asset["current_version"], "document": Document.model_validate_json(asset["document"])})
         return {"name": project["name"], "config": config, "assets": assets}
 
-    def restore_project(self, name: str, config: CheckConfig, documents: list[Document]):
+    @staticmethod
+    def _prepare_project_documents(documents: list[Document]):
         prepared = []
         for document in documents:
             validate_images(document)
             prepared.append((uid(), uid(), document, checksum(document)))
+        return prepared
+
+    def _insert_project_restore(self, conn, name, config, prepared):
+        """Restore current-version documents using the caller's transaction."""
         project = {"id": uid(), "name": name, "created": now()}
+        conn.execute("INSERT INTO projects VALUES (:id,:name,:created)", project)
+        conn.execute("INSERT INTO project_configs(project_id, config, updated) VALUES (?,?,?)", (project["id"], config.model_dump_json(), project["created"]))
+        assets = []
+        for asset_id, version_id, document, digest in prepared:
+            conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project["id"], document.name, version_id, project["created"]))
+            conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "import", document.model_dump_json(), digest, project["created"]))
+            assets.append({"assetId": asset_id, "versionId": version_id, "name": document.name})
+        return {"project": project, "assets": assets}
+
+    def restore_project(self, name: str, config: CheckConfig, documents: list[Document]):
+        prepared = self._prepare_project_documents(documents)
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("INSERT INTO projects VALUES (:id,:name,:created)", project)
-            conn.execute("INSERT INTO project_configs(project_id, config, updated) VALUES (?,?,?)", (project["id"], config.model_dump_json(), project["created"]))
-            for asset_id, version_id, document, digest in prepared:
-                conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project["id"], document.name, version_id, project["created"]))
-                conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "import", document.model_dump_json(), digest, project["created"]))
-        return project
+            self._begin_immediate(conn)
+            receipt = self._insert_project_restore(conn, name, config, prepared)
+        return receipt['project']
+
+    def _project_import_receipt(self, conn, request_key, fingerprint):
+        row = conn.execute("SELECT * FROM project_import_requests WHERE request_key=?", (request_key,)).fetchone()
+        if row is None:
+            return None
+        if row['fingerprint'] != fingerprint or row['project_id'] is None or not conn.execute(
+            "SELECT 1 FROM projects WHERE id=?", (row['project_id'],),
+        ).fetchone():
+            raise IdempotencyConflict("导入请求已变化或原项目已删除")
+        receipt = json.loads(row['receipt'])
+        for asset in receipt['assets']:
+            if not conn.execute(
+                "SELECT 1 FROM assets a JOIN versions v ON v.asset_id=a.id WHERE a.id=? AND a.project_id=? AND v.id=?",
+                (asset['assetId'], row['project_id'], asset['versionId']),
+            ).fetchone():
+                raise IdempotencyConflict("导入项目的原始素材或版本已删除")
+        return {**receipt, "replayed": True}
+
+    def project_import_for_request(self, request_key: str, fingerprint: str):
+        self._validate_import_key(request_key, fingerprint)
+        with self.connection() as conn:
+            return self._project_import_receipt(conn, request_key, fingerprint)
+
+    def restore_project_once(self, name: str, config: CheckConfig, documents: list[Document], request_key: str, fingerprint: str):
+        """Commit a new project, all initial assets/versions and its receipt atomically."""
+        self._validate_import_key(request_key, fingerprint)
+        prepared = self._prepare_project_documents(documents)
+        with self.connection() as conn:
+            self._begin_immediate(conn)
+            previous = self._project_import_receipt(conn, request_key, fingerprint)
+            if previous is not None:
+                return previous
+            receipt = self._insert_project_restore(conn, name, config, prepared)
+            conn.execute("INSERT INTO project_import_requests VALUES (?,?,?,?)", (
+                request_key, fingerprint, receipt['project']['id'], json.dumps(receipt, ensure_ascii=False),
+            ))
+        return {**receipt, "replayed": False}
 
     def _unique_name(self, conn, project_id: str, requested: str) -> str:
         base = requested.strip()[:100] or "未命名素材"
@@ -738,7 +1005,7 @@ class Store:
         if not name:
             raise ValueError("素材名称不能为空")
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute("SELECT project_id,current_version FROM assets WHERE id=?", (asset_id,)).fetchone()
             if not row:
                 raise KeyError("素材不存在")
@@ -767,6 +1034,20 @@ class Store:
             versions = [dict(v) for v in conn.execute("SELECT id,parent,operation,checksum,created FROM versions WHERE asset_id=? ORDER BY created DESC", (asset_id,))]
         return {"id": asset_id, "projectId": row["project_id"], "name": row["name"], "currentVersionId": row["current_version"], "versions": versions, "document": _document_api_payload(self.document(asset_id, row["current_version"]))}
 
+    def asset_project_id(self, asset_id: str) -> str:
+        with self.connection() as connection:
+            row = connection.execute('SELECT project_id FROM assets WHERE id=?', (asset_id,)).fetchone()
+        if row is None:
+            raise KeyError('Asset not found')
+        return row['project_id']
+
+    def generation_project_id(self, generation_id: str) -> str | None:
+        with self.connection() as connection:
+            row = connection.execute('SELECT project_id FROM ai_generations WHERE id=?', (generation_id,)).fetchone()
+        if row is None:
+            raise KeyError('Generation not found')
+        return row['project_id']
+
     def document(self, asset_id: str, version_id: str) -> Document:
         with self.connection() as conn:
             row = conn.execute("SELECT document FROM versions WHERE asset_id=? AND id=?", (asset_id, version_id)).fetchone()
@@ -779,7 +1060,7 @@ class Store:
         digest = checksum(document)
         version_id = uid()
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute("SELECT current_version FROM assets WHERE id=?", (asset_id,)).fetchone()
             if not row:
                 raise KeyError("素材不存在")
@@ -845,7 +1126,7 @@ class Store:
 
     def commit(self, asset_id: str, preview_id: str, expected: str):
         with self.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin_immediate(conn)
             row = conn.execute("SELECT * FROM previews WHERE id=? AND asset_id=?", (preview_id, asset_id)).fetchone()
             if not row:
                 raise KeyError("修复预览不存在")

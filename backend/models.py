@@ -303,12 +303,24 @@ class AiGeneration(Model):
     error: str | None = None
     created: str
     updated: str
+    revision: int = 0
 
 
 class AiCandidateSelect(Model):
     candidateId: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")
     projectId: str | None = None
     name: str | None = Field(default=None, min_length=1, max_length=100)
+
+
+class AiCandidateState(Model):
+    favorite: bool | None = None
+    discarded: bool | None = None
+
+    @model_validator(mode="after")
+    def require_state_change(self):
+        if self.favorite is None and self.discarded is None:
+            raise ValueError("候选状态至少需要提供收藏或淘汰字段")
+        return self
 
 
 class SaveRequest(Model):

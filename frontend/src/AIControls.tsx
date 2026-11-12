@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Check, CircleStop, CopyPlus, Download, LoaderCircle, Pencil, RefreshCw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
+import { Ban, Check, CircleStop, CopyPlus, Download, Heart, LoaderCircle, Maximize2, Pencil, RefreshCw, RotateCcw, Settings2, Sparkles, Trash2, X } from 'lucide-react';
 import { api } from './api';
 import type { Asset } from './types';
 
@@ -22,6 +22,16 @@ type AiProfile = AiConfig & { id: string; name: string };
 type AiProfilesResponse = { profiles: AiProfile[]; activeId: string };
 type ConnectionCheck = { status: 'passed' | 'failed' | 'skipped'; code: string; message: string };
 type ConnectionTest = { ok: boolean; checks: Record<'baseUrl' | 'apiKey' | 'textModel' | 'imageModel', ConnectionCheck> };
+type CandidateMetadata = {
+  width?: number;
+  height?: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  colorCount?: number;
+  hasTransparency?: boolean;
+  hasSemiTransparency?: boolean;
+  processing?: { paletteLimit?: number; resize?: string; dither?: string; alphaThreshold?: number | null; background?: string };
+};
 type Candidate = {
   id: string;
   summary?: string;
@@ -30,6 +40,9 @@ type Candidate = {
   b64Json?: string;
   url?: string;
   image?: string;
+  metadata?: CandidateMetadata;
+  favorite?: boolean;
+  discarded?: boolean;
 };
 type Generation = {
   id: string;
@@ -89,6 +102,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   const [testingConnection, setTestingConnection] = useState(false);
   const [connectionTest, setConnectionTest] = useState<ConnectionTest | null>(null);
   const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
+  const [previewCandidate, setPreviewCandidate] = useState<Candidate | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const profileComboboxRef = useRef<HTMLDivElement>(null);
   const localBusy = useRef(false);
@@ -148,6 +162,8 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   useEffect(() => {
     setTask(null); setHistory([]); setNotice(null);
   }, [projectId]);
+
+  useEffect(() => { setPreviewCandidate(null); }, [task?.id]);
 
   useEffect(() => {
     if (!open || !projectId) return;
@@ -427,7 +443,7 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
   }
 
   async function selectCandidate(candidate: Candidate) {
-    if (!task || working) return;
+    if (!task || working || candidate.discarded) return;
     setWorking(true); setNotice(null);
     try {
       if (beforeImport && !await beforeImport()) return;
@@ -435,6 +451,19 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
       if (result.asset) await onImported?.(result.asset);
       setNotice({ text: result.asset ? '候选已导入为新素材' : '候选已提交，等待项目处理' });
     } catch (error) { setNotice({ text: error instanceof Error ? error.message : '候选导入失败', error: true }); }
+    finally { setWorking(false); }
+  }
+
+  async function updateCandidateState(candidate: Candidate, state: { favorite?: boolean; discarded?: boolean }) {
+    if (!task || working) return;
+    setWorking(true); setNotice(null);
+    try {
+      const next = await api<Generation>(`/ai/generations/${task.id}/candidates/${encodeURIComponent(candidate.id)}/state`, state, 'POST');
+      updateTask(next);
+      if (state.discarded === true) setNotice({ text: '候选已淘汰，可随时恢复' });
+      else if (state.discarded === false) setNotice({ text: '候选已恢复' });
+      else setNotice({ text: state.favorite ? '候选已收藏' : '已取消收藏' });
+    } catch (error) { setNotice({ text: error instanceof Error ? error.message : '候选状态保存失败', error: true }); }
     finally { setWorking(false); }
   }
 
@@ -512,12 +541,26 @@ export function AIControls({ projectId, disabled = false, suspended = false, bef
         </div>{task ? <div className="ai-task" aria-label="AI 生成状态">
           <div><strong>{statusText}</strong>{task.result?.model ? <small>{task.result.model}</small> : null}</div>
           {task.error ? <p className="ai-error">{task.error}</p> : null}
-          {candidates.length ? <div className="ai-candidates">{candidates.map(candidate => <article className="ai-candidate" key={candidate.id}>
-            {responseImage(candidate) ? <img src={responseImage(candidate)} alt={candidate.summary || 'AI 候选'} /> : <div className="ai-command-preview"><strong>绘画命令</strong><span>{candidate.commands?.length || 0} 条</span><pre>{JSON.stringify(candidate.commands?.slice(0, 6) || [], null, 2)}</pre></div>}
-            <p>{candidate.summary || (candidate.commands ? `${candidate.commands.length} 条像素工具命令` : '候选素材')}</p>
-            <div className="ai-candidate-actions"><button className="button secondary" type="button" disabled={working} onClick={() => void selectCandidate(candidate)}><Check size={15} />选择并导入</button>{task.mode === 'image_model' ? <button className="icon-button" type="button" title="下载原始 PNG" aria-label="下载原始 PNG" disabled={working} onClick={() => void downloadSource(candidate)}><Download size={16} /></button> : null}</div>
-          </article>)}</div> : task.status === 'succeeded' ? <p className="ai-empty">任务已完成，但没有可展示的候选。</p> : null}
+          {candidates.length ? <>
+            <div className="ai-candidates-heading"><strong>候选并排对比</strong><span>{candidates.filter(candidate => !candidate.discarded).length} 个可导入</span></div>
+            <div className="ai-candidates">{candidates.map(candidate => {
+              const metadata = candidate.metadata;
+              const processing = metadata?.processing;
+              const transparency = metadata?.hasSemiTransparency ? '含半透明' : metadata?.hasTransparency ? '含透明' : '不透明';
+              return <article className={`ai-candidate${candidate.favorite ? ' is-favorite' : ''}${candidate.discarded ? ' is-discarded' : ''}`} key={candidate.id}>
+                <button className="ai-candidate-preview" type="button" aria-label={`放大查看候选 ${candidate.id}`} disabled={working} onClick={() => setPreviewCandidate(candidate)}>
+                  {responseImage(candidate) ? <img src={responseImage(candidate)} alt={candidate.summary || 'AI 候选'} /> : <div className="ai-command-preview"><strong>绘画命令</strong><span>{candidate.commands?.length || 0} 条</span><pre>{JSON.stringify(candidate.commands?.slice(0, 6) || [], null, 2)}</pre></div>}
+                  <span className="ai-preview-hint"><Maximize2 size={13} />放大查看</span>
+                </button>
+                <div className="ai-candidate-title"><strong>{candidate.favorite ? '已收藏' : candidate.discarded ? '已淘汰' : '候选'}</strong><span>{candidate.id}</span></div>
+                <p>{candidate.summary || (candidate.commands ? `${candidate.commands.length} 条像素工具命令` : '候选素材')}</p>
+                <dl className="ai-candidate-meta"><div><dt>尺寸</dt><dd>{metadata?.width && metadata?.height ? `${metadata.width}×${metadata.height}` : '—'}{metadata?.sourceWidth && metadata.sourceHeight ? `（原图 ${metadata.sourceWidth}×${metadata.sourceHeight}）` : ''}</dd></div><div><dt>色数</dt><dd>{metadata?.colorCount ?? '—'}</dd></div><div><dt>透明度</dt><dd>{transparency}</dd></div><div><dt>处理</dt><dd>{processing ? `${processing.paletteLimit ?? '不限'} 色 · ${processing.resize === 'nearest' ? '最近邻' : processing.resize || '原尺寸'} · ${processing.dither === 'none' ? '无抖动' : processing.dither || '默认'}` : '—'}</dd></div></dl>
+                <div className="ai-candidate-actions"><button className="button secondary" type="button" disabled={working || candidate.discarded} onClick={() => void selectCandidate(candidate)}><Check size={15} />选择并导入</button><button className={`icon-button${candidate.favorite ? ' is-active' : ''}`} type="button" title={candidate.favorite ? '取消收藏' : '收藏候选'} aria-label={candidate.favorite ? '取消收藏' : '收藏候选'} disabled={working || candidate.discarded} onClick={() => void updateCandidateState(candidate, { favorite: !candidate.favorite })}><Heart size={15} fill={candidate.favorite ? 'currentColor' : 'none'} /></button><button className="icon-button" type="button" title={candidate.discarded ? '恢复候选' : '淘汰候选'} aria-label={candidate.discarded ? '恢复候选' : '淘汰候选'} disabled={working} onClick={() => void updateCandidateState(candidate, { discarded: !candidate.discarded })}>{candidate.discarded ? <RotateCcw size={15} /> : <Ban size={15} />}</button>{task.mode === 'image_model' ? <button className="icon-button" type="button" title="下载原始 PNG" aria-label="下载原始 PNG" disabled={working} onClick={() => void downloadSource(candidate)}><Download size={16} /></button> : null}</div>
+              </article>;
+            })}</div>
+          </> : task.status === 'succeeded' ? <p className="ai-empty">任务已完成，但没有可展示的候选。</p> : null}
         </div> : null}</div>
+        {previewCandidate ? <div className="ai-candidate-viewer" role="dialog" aria-modal="true" aria-label="AI 候选放大预览" onMouseDown={event => { if (event.target === event.currentTarget) setPreviewCandidate(null); }}><div className="ai-candidate-viewer-card"><div className="ai-candidate-viewer-heading"><strong>{previewCandidate.id} · {previewCandidate.favorite ? '已收藏' : previewCandidate.discarded ? '已淘汰' : '候选预览'}</strong><button className="icon-button" type="button" aria-label="关闭候选预览" onClick={() => setPreviewCandidate(null)}><X size={16} /></button></div>{responseImage(previewCandidate) ? <img src={responseImage(previewCandidate)} alt={previewCandidate.summary || 'AI 候选放大预览'} /> : <pre>{JSON.stringify(previewCandidate.commands || [], null, 2)}</pre>}<p>{previewCandidate.summary || '像素候选预览'}</p></div></div> : null}
         {notice ? <p role={notice.error ? 'alert' : 'status'} className={`ai-notice ${notice.error ? 'error' : ''}`}>{notice.text}</p> : null}
       </section>
     </div> : null}

@@ -82,9 +82,25 @@ npx playwright test --config desktop.playwright.config.ts
 
 上传 PNG 最大 8 MB，单帧最大 512×512，Sheet 最大 2048×2048，请求最大 20 MB，分层总像素数最多 8,388,608。接口文档位于 `/docs`。
 
-尚未实现：多用户隔离、原生 Aseprite 格式、JSON 包回导入、复杂混合模式、Sheet 边距/间距、碰撞框交互编辑、引擎插件。Godot 导入验证状态见 [实现状态](docs/implementation-status.md)。
+尚未实现：客户生产级 MCP 接入（真实客户 OAuth/TLS 与宿主确认流程验收、租户路由、镜像发布、任务事件）、原生 Aseprite 格式、完整高级混合模式、碰撞框交互编辑、引擎插件。当前 MCP 已可独立安装，用于本地工作流或配置了 OAuth 的单工作区进程；审计与接入路线见 [AI 工作流接入审计](docs/agent-integration-audit.md)。Godot 导入验证状态见 [实现状态](docs/implementation-status.md)。
 
 ## Agent / MCP 集成
 
-项目提供标准 MCP 服务，默认只读，可被 Codex、Zed、Hermes/Harmes 及其他 MCP 客户端使用。先安装依赖，再将仓库中的 `.mcp.json` 加载到客户端；Codex 也可以执行 `codex mcp add pixelarting -- .venv/bin/python -m backend.mcp_server`。需要 agent 修改素材时，在客户端 MCP 配置中显式设置 `PIXELART_MCP_ALLOW_WRITE=1`。完整工具清单和 Streamable HTTP 配置见 [MCP 文档](docs/mcp.md)。
+独立包 `pixelarting-mcp 0.11.0` 无需 Electron/Node.js，默认只读，可供标准 MCP 客户端调用项目、素材、版本、质检、修复和导出能力。全部 JSON 工具提供逐字段输出 schema，保留现有返回形状。在源码目录安装后运行：
+
+```bash
+.venv/bin/pip install .
+.venv/bin/pixelarting-mcp --data-dir /absolute/path/to/workspace --read-only
+.venv/bin/pixelarting-mcp --schema
+```
+
+0.9.0 的 `get_permissions` 和发现项授权元数据公开当前 scope、项目边界、写门禁与确认要求，与服务端授权共用声明。客户端可据此判断调用前提；实际目标仍在每次调用时校验，详见 [权限合同](docs/mcp-permissions.md)。
+
+升级到 0.4.0 时，旧版仅在全局钥匙串保存的默认 provider 密钥需要在所属工作区重新保存，以完成凭据隔离；见 [升级说明](docs/mcp-security.md#040-凭据隔离与升级)。
+
+客户端配置使用可执行文件和数据目录的绝对路径。需要 agent 修改素材时，所有者显式启用 `--allow-write`。独立入口默认使用用户数据目录；共享桌面素材时应显式指向桌面使用的 `data/`。原有 `.mcp.json` 和 `python -m backend.mcp_server` 入口保持兼容。
+
+非 root 容器构建、Linux OAuth HTTP Compose、持久化卷和真实旧 wheel 的升级/离线回滚验收见 [部署文档](docs/mcp-deployment.md)。当前镜像需自行构建，尚未发布。
+
+支持本机 Streamable HTTP、能力发现、持久化生成任务、候选预览/收藏/淘汰/导入，以及基于不可变版本的 PNG/ZIP 资源读取。[文件导入](docs/mcp-imports.md) 支持 PNG/Sheet、分层 ZIP 和项目备份的只读预检、质检及持久化幂等导入；项目备份以新 ID 恢复配置与素材当前版本，OAuth 下要求管理员权限。生成提交和重试需要幂等键；生成使用本地已配置的 provider，可能产生费用。可选 OAuth JWT、项目授权、审计、限流和服务端写入二次确认配置见 [HTTP 安全接入](docs/mcp-security.md)。全部写工具现已提供幂等键和可发现的重放规则，可靠重试应传键并保留原参数，见 [写入幂等](docs/mcp-idempotency.md)。0.11.0 新增 [Workspace HTTP API v1 与 OpenAPI](docs/workspace-api-v1.md)，供普通 HTTP 工具和插件接入同一套授权及幂等规则。任务推送事件和完整客户部署验收仍待完成。安装、客户配置、工具清单见 [MCP 文档](docs/mcp.md)，字段和兼容约定见 [本地 v1 合同](docs/mcp-v1.md)。
 

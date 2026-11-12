@@ -1,0 +1,9 @@
+**
+!Dockerfile.mcp
+!pyproject.toml
+!README.md
+!LICENSE
+!backend/
+!backend/*.py
+!deploy/
+!deploy/requirements-mcp.lock

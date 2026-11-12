@@ -12,3 +12,6 @@ frontend/*.tsbuildinfo
 .idea/
 .codex/
 .vite/
+build/
+dist/
+*.egg-info/

@@ -123,9 +123,10 @@ def _member_content(data: memoryview, entry: zipfile.ZipInfo, end_offset: int, r
     return content
 
 
-def _read_archive(data: bytes) -> dict[str, bytes]:
+def _read_archive(data: bytes, *, max_expanded_bytes: int | None = None) -> dict[str, bytes]:
     if len(data) > MAX_ARCHIVE_BYTES:
         raise ValueError("ZIP 文件不能超过 128 MB")
+    max_expanded_bytes = MAX_EXPANDED_BYTES if max_expanded_bytes is None else min(max_expanded_bytes, MAX_EXPANDED_BYTES)
     files = {}
     try:
         # Inspect the end record before ZipFile allocates its entry objects.
@@ -154,12 +155,12 @@ def _read_archive(data: bytes) -> dict[str, bytes]:
                     raise ValueError("ZIP 不接受链接、特殊文件或加密文件")
                 if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
                     raise ValueError("ZIP 压缩方式不受支持")
-                if entry.file_size > MAX_MEMBER_BYTES or entry.file_size > MAX_EXPANDED_BYTES - total:
+                if entry.file_size > MAX_MEMBER_BYTES or entry.file_size > max_expanded_bytes - total:
                     raise ValueError("ZIP 解压数据超过安全上限")
                 if entry.is_dir():
                     if entry.file_size:
                         raise ValueError("ZIP 目录不能包含文件数据")
-                content = _member_content(raw, entry, ends[entry.header_offset], MAX_EXPANDED_BYTES - total)
+                content = _member_content(raw, entry, ends[entry.header_offset], max_expanded_bytes - total)
                 total += len(content)
                 if not entry.is_dir():
                     files[name] = content
@@ -248,15 +249,15 @@ def _document(files: dict[str, bytes], prefix: str, pixel_budget: int = MAX_PROJ
     return document
 
 
-def import_bundle(data: bytes) -> Document:
-    files = _read_archive(data)
+def import_bundle(data: bytes, *, max_expanded_bytes: int | None = None, pixel_budget: int | None = None) -> Document:
+    files = _read_archive(data, max_expanded_bytes=max_expanded_bytes)
     candidates = [name for name in files if name == "asset.json" or name.endswith("/asset.json")]
     if len(candidates) != 1:
         raise ValueError("分层包必须包含一个素材")
     prefix = candidates[0][:-len("asset.json")]
     if any(not name.startswith(prefix) for name in files):
         raise ValueError("分层包包含素材目录之外的文件")
-    return _document(files, prefix)
+    return _document(files, prefix, MAX_PROJECT_PIXELS if pixel_budget is None else min(pixel_budget, MAX_PROJECT_PIXELS))
 
 
 def _archive(files: dict[str, bytes]) -> bytes:
@@ -298,8 +299,8 @@ def export_project(snapshot: dict) -> bytes:
     return _archive(files)
 
 
-def import_project(data: bytes) -> tuple[str, CheckConfig, list[Document]]:
-    files = _read_archive(data)
+def import_project(data: bytes, *, max_expanded_bytes: int | None = None, pixel_budget: int | None = None) -> tuple[str, CheckConfig, list[Document]]:
+    files = _read_archive(data, max_expanded_bytes=max_expanded_bytes)
     _verify_manifest(files)
     metadata = ProjectArchive.model_validate(_metadata(files, "project.json"))
     prefixes = []
@@ -311,7 +312,7 @@ def import_project(data: bytes) -> tuple[str, CheckConfig, list[Document]]:
         raise ValueError("项目备份包含重复素材")
     if any(name not in ("project.json", "manifest.json") and not any(name.startswith(prefix) for prefix in prefixes) for name in files):
         raise ValueError("项目备份包含未登记的文件")
-    documents, remaining = [], MAX_PROJECT_PIXELS
+    documents, remaining = [], MAX_PROJECT_PIXELS if pixel_budget is None else min(pixel_budget, MAX_PROJECT_PIXELS)
     for prefix in prefixes:
         document = _document(files, prefix, remaining)
         documents.append(document)

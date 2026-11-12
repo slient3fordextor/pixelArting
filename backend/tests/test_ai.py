@@ -176,6 +176,29 @@ def test_drawing_generation_preview_select_and_idempotence(client):
     assert client.get("/api/ai/generations", params={"projectId": project["id"], "status": "succeeded"}).json()[0]["id"] == queued["id"]
 
 
+def test_candidate_metadata_and_favorite_discard_state(client):
+    configure(client)
+    client.app.state.ai_provider_factory = DrawingProvider
+    project = client.post("/api/projects", json={"name": "候选状态"}).json()
+    task = wait_task(client, generate(client, project["id"], width=8, height=8, variations=1, paletteLimit=16)["id"])
+    candidate = task["result"]["candidates"][0]
+    assert candidate["metadata"] == {
+        "width": 8, "height": 8, "colorCount": 1,
+        "hasTransparency": True, "hasSemiTransparency": False,
+        "processing": {"paletteLimit": 16, "resize": "nearest", "dither": "none", "alphaThreshold": 128, "background": "transparent"},
+    }
+    path = f'/api/ai/generations/{task["id"]}/candidates/{candidate["id"]}/state'
+    favorited = client.post(path, json={"favorite": True})
+    assert favorited.status_code == 200
+    assert favorited.json()["result"]["candidates"][0]["favorite"] is True
+    discarded = client.post(path, json={"discarded": True}).json()
+    item = discarded["result"]["candidates"][0]
+    assert item["discarded"] is True and item["favorite"] is False
+    assert client.post(f'/api/ai/generations/{task["id"]}/select', json={"candidateId": candidate["id"], "projectId": project["id"]}).status_code == 409
+    restored = client.post(path, json={"discarded": False}).json()
+    assert restored["result"]["candidates"][0]["discarded"] is False
+
+
 def test_cancelled_task_discards_late_result_and_retry(client):
     configure(client)
     started, release = threading.Event(), threading.Event()
@@ -206,6 +229,73 @@ def test_cancelled_task_discards_late_result_and_retry(client):
     assert client.get(f'/api/ai/generations/{queued["id"]}').json()["result"] is None
 
 
+def test_provider_stream_cancellation_closes_http_response():
+    class BlockingStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'{"partial":'
+            time.sleep(2)
+            yield b'true}'
+
+    provider = OpenAICompatibleProvider(
+        AiProviderConfig(apiKey=KEY, requestTimeoutSeconds=5),
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=BlockingStream())),
+    )
+    cancelled = threading.Event()
+    categories = []
+
+    def request():
+        try:
+            provider._post("chat/completions", {}, cancelled)
+        except AiProviderError as error:
+            categories.append(error.category)
+
+    worker = threading.Thread(target=request)
+    worker.start()
+    time.sleep(0.1)
+    cancelled.set()
+    # A mock byte generator can be blocked inside its own sleep even after
+    # the response is closed; real socket reads are interrupted by close.
+    worker.join(3)
+    assert not worker.is_alive()
+    assert categories == ["cancelled"]
+
+
+def test_generation_tasks_using_one_profile_run_serially(client):
+    configure(client)
+    first_started, release_first = threading.Event(), threading.Event()
+    state_lock = threading.Lock()
+    active = max_active = calls = 0
+
+    class SerialProvider(DrawingProvider):
+        def generate_text(self, request):
+            nonlocal active, max_active, calls
+            with state_lock:
+                calls += 1
+                call_number = calls
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                if call_number == 1:
+                    first_started.set()
+                    assert release_first.wait(5)
+                return drawing_result()
+            finally:
+                with state_lock:
+                    active -= 1
+
+    client.app.state.ai_provider_factory = SerialProvider
+    first, second = generate(client), generate(client)
+    assert first_started.wait(2)
+    time.sleep(0.1)
+    with state_lock:
+        assert calls == 1
+        assert max_active == 1
+    release_first.set()
+    assert wait_task(client, first["id"])["status"] == "succeeded"
+    assert wait_task(client, second["id"])["status"] == "succeeded"
+    assert max_active == 1
+
+
 def test_failed_provider_cannot_leak_key(client):
     configure(client)
 
@@ -219,7 +309,7 @@ def test_failed_provider_cannot_leak_key(client):
     assert KEY not in json.dumps(task)
 
 
-def test_transient_provider_failure_retries_with_bounded_backoff(client, monkeypatch):
+def test_transient_provider_failure_retries_with_bounded_backoff(client):
     configure(client)
     calls = []
 
@@ -230,7 +320,6 @@ def test_transient_provider_failure_retries_with_bounded_backoff(client, monkeyp
                 raise AiProviderError("临时失败", "transient_error")
             return drawing_result()
 
-    monkeypatch.setattr("backend.app.time.sleep", lambda seconds: None)
     client.app.state.ai_provider_factory = FlakyProvider
     task = wait_task(client, generate(client, width=8, height=8)["id"])
     assert task["status"] == "succeeded"
@@ -385,7 +474,7 @@ def test_api_keys_migrate_to_keyring_and_are_not_kept_in_sqlite(tmp_path, monkey
     with migrated.connection() as conn:
         rows = conn.execute("SELECT config FROM ai_provider_profiles UNION ALL SELECT config FROM ai_provider_config").fetchall()
     assert KEY not in json.dumps([row["config"] for row in rows])
-    assert fake.values[("PixelArting", "ai-profile:default")] == KEY
+    assert fake.values[(migrated.secrets.service, "ai-profile:default")] == KEY
 
 
 def test_new_api_key_is_written_to_keyring_before_profile_response(tmp_path, monkeypatch):
@@ -403,7 +492,7 @@ def test_new_api_key_is_written_to_keyring_before_profile_response(tmp_path, mon
     with store.connection() as conn:
         row = conn.execute("SELECT config FROM ai_provider_profiles WHERE id=?", (profile["id"],)).fetchone()
     assert KEY not in row["config"]
-    assert fake.values[("PixelArting", f"ai-profile:{profile['id']}")] == KEY
+    assert fake.values[(store.secrets.service, f"ai-profile:{profile['id']}")] == KEY
     generation = store.create_generation(AiGenerationRequest(mode="agent_draw", prompt="任务"), AiProviderConfig(apiKey=KEY))
     with store.connection() as conn:
         row = conn.execute("SELECT provider_config,provider_secret FROM ai_generations WHERE id=?", (generation.id,)).fetchone()
