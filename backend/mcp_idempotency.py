@@ -89,7 +89,12 @@ def idempotent_write(workspace, require_writes, *, after_commit=None):
                 if not isinstance(key, str) or not 1 <= len(key) <= 128 or re.fullmatch(KEY_PATTERN, key) is None:
                     raise ValueError('Invalid write idempotency key')
                 arguments = to_jsonable_python({name: value for name, value in bound.arguments.items() if name != 'idempotency_key'})
-                canonical = json.dumps({'version': '1', 'tool': function.__name__, 'arguments': arguments},
+                # Preserve receipts written before optional configuration
+                # preconditions were added to the v1 tool contract.
+                fingerprint_arguments = dict(arguments)
+                if function.__name__ == 'update_project_config' and fingerprint_arguments.get('expected_config') is None:
+                    fingerprint_arguments.pop('expected_config', None)
+                canonical = json.dumps({'version': '1', 'tool': function.__name__, 'arguments': fingerprint_arguments},
                                        ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
                 fingerprint = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 

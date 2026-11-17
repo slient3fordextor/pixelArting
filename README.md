@@ -104,3 +104,6 @@ npx playwright test --config desktop.playwright.config.ts
 
 支持本机 Streamable HTTP、能力发现、持久化生成任务、候选预览/收藏/淘汰/导入，以及基于不可变版本的 PNG/ZIP 资源读取。[文件导入](docs/mcp-imports.md) 支持 PNG/Sheet、分层 ZIP 和项目备份的只读预检、质检及持久化幂等导入；项目备份以新 ID 恢复配置与素材当前版本，OAuth 下要求管理员权限。生成提交和重试需要幂等键；生成使用本地已配置的 provider，可能产生费用。可选 OAuth JWT、项目授权、审计、限流和服务端写入二次确认配置见 [HTTP 安全接入](docs/mcp-security.md)。全部写工具现已提供幂等键和可发现的重放规则，可靠重试应传键并保留原参数，见 [写入幂等](docs/mcp-idempotency.md)。0.11.0 新增 [Workspace HTTP API v1 与 OpenAPI](docs/workspace-api-v1.md)，供普通 HTTP 工具和插件接入同一套授权及幂等规则。任务推送事件和完整客户部署验收仍待完成。安装、客户配置、工具清单见 [MCP 文档](docs/mcp.md)，字段和兼容约定见 [本地 v1 合同](docs/mcp-v1.md)。
 
+
+
+工作区容量统计与审计归档：见 [存储维护](docs/storage-maintenance.md)。本轮代码审查的修复范围、回归和后续架构工作见 [修复记录](docs/review-fixes-2026-11-17.md)。

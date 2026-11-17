@@ -3,6 +3,9 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+MAX_DOCUMENT_PIXELS = 8_388_608
+
 
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -68,7 +71,7 @@ class Document(Model):
         frame_ids = [frame.id for frame in self.frames]
         if len(set(layer_ids)) != len(layer_ids) or len(set(frame_ids)) != len(frame_ids):
             raise ValueError("图层和帧 ID 必须唯一")
-        if sum(frame.width * frame.height for frame in self.frames) * len(self.layers) > 8_388_608:
+        if sum(frame.width * frame.height for frame in self.frames) * len(self.layers) > MAX_DOCUMENT_PIXELS:
             raise ValueError("素材总像素数超过上限")
         for frame in self.frames:
             if set(frame.pixels) != set(layer_ids):
@@ -81,6 +84,15 @@ class Document(Model):
         if any(ref.frameId not in frame_ids for a in self.animations for ref in a.frames):
             raise ValueError("动画引用不存在的帧")
         return self
+
+    def validate_storage_budget(self):
+        """Bound new writes without making older oversized versions unreadable."""
+        pixel_count = sum(frame.width * frame.height for frame in self.frames) * len(self.layers)
+        overflow_count = sum(len(pixels) for frame in self.frames for pixels in frame.layerOverflow.values())
+        if pixel_count + overflow_count > MAX_DOCUMENT_PIXELS:
+            raise ValueError("素材总像素数（含越界像素）超过上限")
+        if len(self.model_dump_json().encode("utf-8")) > MAX_DOCUMENT_BYTES:
+            raise ValueError("素材文档编码大小超过 20 MiB 上限")
 
 
 RULES = (
@@ -341,6 +353,11 @@ class RenameAssetRequest(Model):
     expectedCurrentVersionId: str
     name: str = Field(min_length=1, max_length=100)
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
 
 class CopyAssetRequest(Model):
     sourceAssetId: str | None = None
@@ -380,10 +397,16 @@ class CommitRequest(Model):
 class ProjectCreate(Model):
     name: str = Field(min_length=1, max_length=80)
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def trim_name(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
 
 class RenameProjectRequest(Model):
     name: str = Field(min_length=1, max_length=80)
-    expectedName: str = Field(min_length=1, max_length=80)
+    # Match legacy names verbatim, including invalid names created by old MCP clients.
+    expectedName: str
 
     @field_validator("name", mode="before")
     @classmethod
@@ -392,7 +415,8 @@ class RenameProjectRequest(Model):
 
 
 class DeleteProjectRequest(Model):
-    expectedName: str = Field(min_length=1, max_length=80)
+    # Match legacy names verbatim, including invalid names created by old MCP clients.
+    expectedName: str
     expectedCurrentVersions: dict[str, str] = Field(max_length=10000)
 
 

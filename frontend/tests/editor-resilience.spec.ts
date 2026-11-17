@@ -1,9 +1,17 @@
 import { expect, test } from '@playwright/test';
+import type { Page } from '@playwright/test';
+
+async function switchProject(page: Page, project: { name: string }) {
+  await page.getByRole('button', { name: '切换项目', exact: true }).click();
+  const option = page.getByRole('option').filter({ hasText: project.name });
+  if (await option.isEnabled()) await option.click();
+  else await page.getByRole('button', { name: '关闭对话框', exact: true }).click();
+}
 
 test('saving during a held pointer commits the complete stroke before a slow request', async ({ page, request }) => {
   const project = await (await request.post('/api/projects', { data: { name: '笔画保存测试' } })).json();
   const asset = await (await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '笔画素材', width: 16, height: 16 } })).json();
-  await page.goto('/'); await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.goto('/'); await switchProject(page, project);
   const canvas = page.getByLabel('像素编辑画布', { exact: true });
   await expect(canvas).toHaveAttribute('aria-busy', 'false');
   let release!: () => void;
@@ -26,19 +34,22 @@ test('saving during a held pointer commits the complete stroke before a slow req
   }, saved.document.frames[0].pixels.base);
   expect(alphas).toEqual([255, 255, 255, 255]);
   await expect(page.locator('.draft-badge')).toHaveCount(0);
+  await page.reload(); await switchProject(page, project);
+  await expect(canvas).toHaveAttribute('aria-busy', 'false');
+  expect(await canvas.evaluate((element: HTMLCanvasElement) => [2, 3, 4, 5].map(x => element.getContext('2d')!.getImageData(x, 2, 1, 1).data[3]))).toEqual([255, 255, 255, 255]);
 });
 
 test('a real version conflict keeps the local draft across reload and can save it as a copy', async ({ page, request }) => {
   const project = await (await request.post('/api/projects', { data: { name: '冲突草稿测试' } })).json();
   const asset = await (await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '冲突素材' } })).json();
-  await page.goto('/'); await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.goto('/'); await switchProject(page, project);
   await page.getByLabel('帧基线').fill('18');
   await expect(page.locator('.status-bar')).toContainText('草稿已自动保存');
   const externalDocument = structuredClone(asset.document); externalDocument.frames[0].baselineY = 27;
   const external = await (await request.post(`/api/assets/${asset.id}/save`, { data: { expectedCurrentVersionId: asset.currentVersionId, document: externalDocument } })).json();
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('版本');
-  await page.reload(); await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await page.reload(); await switchProject(page, project);
   await expect(page.locator('.draft-conflict')).toContainText('旧版本');
   await expect(page.getByLabel('帧基线')).toHaveValue('27');
   expect(await page.evaluate(id => localStorage.getItem(`pixelart-draft-v1:${id}`), asset.id)).not.toBeNull();
@@ -63,7 +74,7 @@ test('onion skins follow animation order and moving collision boxes preserves di
   document.frames = images.map((image, i) => ({ ...structuredClone(document.frames[0]), id: `frame_${i}`, pixels: { base: image } }));
   document.animations = [{ action: 'walk', direction: 'down', loop: true, frames: [{ frameId: 'frame_2', durationMs: 200 }, { frameId: 'frame_0', durationMs: 200 }] }];
   await request.post(`/api/assets/${asset.id}/save`, { data: { expectedCurrentVersionId: asset.currentVersionId, document } });
-  await page.getByLabel('项目', { exact: true }).selectOption(project.id);
+  await switchProject(page, project);
   await page.getByRole('button', { name: '洋葱皮预览', exact: true }).click();
   await expect.poll(() => page.getByLabel('洋葱皮预览画布').evaluate((el: HTMLCanvasElement) => Array.from(el.getContext('2d')!.getImageData(4, 4, 1, 1).data).slice(0, 3))).toEqual([0, 0, 255]);
   await page.getByRole('button', { name: '添加碰撞框', exact: true }).click();
@@ -72,4 +83,22 @@ test('onion skins follow animation order and moving collision boxes preserves di
   await expect(page.getByLabel('碰撞框 1 width', { exact: true })).toHaveValue('16');
   await page.getByLabel('碰撞框 1 x', { exact: true }).fill('0');
   await expect(page.getByLabel('碰撞框 1 width', { exact: true })).toHaveValue('16');
+});
+
+
+test('project configuration uses the real ETag and preserves a local edit after an external update', async ({ page, request }) => {
+  const project = await (await request.post('/api/projects', { data: { name: '配置并发回归' } })).json();
+  await request.post(`/api/projects/${project.id}/assets/blank`, { data: { name: '配置测试素材', width: 16, height: 16 } });
+  await page.goto('/'); await switchProject(page, project);
+  await page.getByRole('button', { name: '质检', exact: true }).click();
+  await page.getByLabel('颜色上限', { exact: true }).fill('9');
+  const initial = await request.get(`/api/projects/${project.id}/check-config`);
+  const etag = initial.headers().etag;
+  expect(etag).toMatch(/^"[0-9a-f]{64}"$/);
+  const external = await request.put(`/api/projects/${project.id}/check-config`, { headers: { 'If-Match': etag }, data: { ...await initial.json(), maxColors: 7 } });
+  expect(external.ok()).toBe(true);
+  await page.getByRole('button', { name: '保存项目配置', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('项目配置已变化');
+  await expect(page.getByLabel('颜色上限', { exact: true })).toHaveValue('9');
+  expect((await (await request.get(`/api/projects/${project.id}/check-config`)).json()).maxColors).toBe(7);
 });

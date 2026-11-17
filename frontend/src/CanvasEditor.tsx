@@ -9,8 +9,8 @@ import { brushStampSpacing, sampleBrushStroke } from './drawingBrush';
 import type { BrushStroke } from './drawingBrush';
 import type { FillSettings } from './drawingFill';
 import type { Frame, Layer, Finding, ColorSampleSource, FrameMetadata } from './types';
-import { resizeSelectionPixels, transformSelectionPixels } from './selectionPixels';
-import type { SelectionTransform } from './selectionPixels';
+import { mapSelectionPixels, resizeSelectionPixels, transformSelectionPixels } from './selectionPixels';
+import type { SelectionPixels, SelectionTransform } from './selectionPixels';
 
 export type DrawingTool =
   | 'pencil'
@@ -204,6 +204,10 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     layerOverflows = {},
     label = '像素编辑画布',
   } = props;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const currentTarget = useRef({ frame, activeLayer, readonly });
+  currentTarget.current = { frame, activeLayer, readonly };
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const onionRef = useRef<HTMLCanvasElement>(null);
   const sourceRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
@@ -232,27 +236,13 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
   const selectionRef = useRef<Rect | null>(null);
   const selectionMaskRef = useRef<Uint8Array | null>(null);
   const lassoPath = useRef<Point[]>([]);
-  const guideDrag = useRef<'origin' | 'baseline' | null>(null);
-
-  useEffect(() => {
-    if (!guideDrag.current) return;
-    const move = (event: globalThis.PointerEvent) => {
-      const board = canvasRef.current?.getBoundingClientRect();
-      if (!board || !onFrameMetadataChange) return;
-      const x = Math.max(0, Math.min(frame.width - 1, Math.round((event.clientX - board.left) / zoom)));
-      const y = Math.max(0, Math.min(frame.height - 1, Math.round((event.clientY - board.top) / zoom)));
-      const metadata: FrameMetadata = { origin: frame.origin ? { ...frame.origin } : { x, y }, baselineY: frame.baselineY, collisionRects: frame.collisionRects };
-      if (guideDrag.current === 'origin') metadata.origin = { x, y }; else metadata.baselineY = y;
-      onFrameMetadataChange(metadata);
-    };
-    const end = () => { guideDrag.current = null; };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', end, { once: true });
-    return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); };
-  }, [frame, zoom, onFrameMetadataChange]);
-  const selectionClipboard = useRef<ImageData | null>(null);
+  const guideDrag = useRef<{ kind: 'origin' | 'baseline'; pointer: number; frameId: string; initial: FrameMetadata; pending: FrameMetadata } | null>(null);
+  const [guidePreview, setGuidePreview] = useState<FrameMetadata | null>(null);
+  const guideHandlers = useRef({ move: (_event: globalThis.PointerEvent) => {}, finish: (_cancelled = false) => {} });
+  const selectionClipboard = useRef<SelectionPixels | null>(null);
   const selectionSnapshot = useRef<ImageData | null>(null);
-  const selectionMoveBuffer = useRef<ImageData | null>(null);
+  const selectionMoveBuffer = useRef<SelectionPixels | null>(null);
+  const selectionMoveMask = useRef<Uint8Array | null>(null);
   const selectionMoveStart = useRef<Point | null>(null);
   const selectionMoveOrigin = useRef<Rect | null>(null);
   const selectionMoving = useRef(false);
@@ -349,6 +339,51 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     };
   }, []);
 
+  function finishGuide(cancelled = false) {
+    const drag = guideDrag.current;
+    if (!drag) return;
+    guideDrag.current = null;
+    setGuidePreview(null);
+    onStrokeStateChange?.(false);
+    if (!cancelled && !readonly && drag.frameId === frame.id && JSON.stringify(drag.initial) !== JSON.stringify(drag.pending)) onFrameMetadataChange?.(drag.pending);
+  }
+
+  function startGuide(event: PointerEvent<HTMLElement>, kind: 'origin' | 'baseline') {
+    if (readonly || !onFrameMetadataChange || drawing.current || panDrawing.current || event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation();
+    const initial: FrameMetadata = { origin: frame.origin, baselineY: frame.baselineY, collisionRects: frame.collisionRects };
+    guideDrag.current = { kind, pointer: event.pointerId, frameId: frame.id, initial, pending: initial };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    onStrokeStateChange?.(true);
+  }
+
+  guideHandlers.current = {
+    move: event => {
+      const drag = guideDrag.current;
+      const board = canvasRef.current?.getBoundingClientRect();
+      if (!drag || drag.pointer !== event.pointerId || !board || readonly) return;
+      const x = clamp(Math.round((event.clientX - board.left) * frame.width / board.width), frame.width);
+      const y = clamp(Math.round((event.clientY - board.top) * frame.height / board.height), frame.height);
+      drag.pending = { ...drag.initial, ...(drag.kind === 'origin' ? { origin: { x, y } } : { baselineY: y }) };
+      setGuidePreview(drag.pending);
+    },
+    finish: finishGuide,
+  };
+  useEffect(() => {
+    const move = (event: globalThis.PointerEvent) => guideHandlers.current.move(event);
+    const end = (event: globalThis.PointerEvent) => { if (guideDrag.current?.pointer === event.pointerId) guideHandlers.current.finish(event.type === 'pointercancel'); };
+    const blur = () => guideHandlers.current.finish(true);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+    window.addEventListener('blur', blur);
+    return () => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end); window.removeEventListener('blur', blur);
+    };
+  }, []);
+  useEffect(() => { if (readonly || (guideDrag.current && guideDrag.current.frameId !== frame.id)) finishGuide(true); }, [readonly, frame.id]);
+
   function updateSelection(next: Rect | null, mask: Uint8Array | null = null) {
     selectionRef.current = next;
     selectionMaskRef.current = mask;
@@ -362,11 +397,54 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     return sourceRef.current.get(activeLayer)?.getContext('2d') ?? null;
   }
 
+  function selectedPixels(context: CanvasRenderingContext2D, region: Rect): SelectionPixels {
+    const image = context.getImageData(region.x, region.y, region.width, region.height);
+    const coverage = selectionMaskRef.current;
+    if (!coverage) return { image, mask: null };
+    const mask = new Uint8Array(region.width * region.height);
+    for (let y = 0; y < region.height; y++) for (let x = 0; x < region.width; x++) {
+      const index = y * region.width + x;
+      mask[index] = coverage[(region.y + y) * frame.width + region.x + x];
+      if (!mask[index]) image.data.fill(0, index * 4, index * 4 + 4);
+    }
+    return { image, mask };
+  }
+
+  function clearSelectedPixels(context: CanvasRenderingContext2D, region: Rect, mask: Uint8Array | null = selectionMaskRef.current) {
+    if (!mask) { context.clearRect(region.x, region.y, region.width, region.height); return; }
+    const image = context.getImageData(region.x, region.y, region.width, region.height);
+    for (let y = 0; y < region.height; y++) for (let x = 0; x < region.width; x++) {
+      if (mask[(region.y + y) * frame.width + region.x + x]) image.data.fill(0, (y * region.width + x) * 4, (y * region.width + x) * 4 + 4);
+    }
+    context.putImageData(image, region.x, region.y);
+  }
+
+  function putSelectedPixels(context: CanvasRenderingContext2D, pixels: SelectionPixels, x: number, y: number) {
+    const { image, mask } = pixels;
+    if (!mask) { context.putImageData(image, x, y); return; }
+    const target = context.getImageData(x, y, image.width, image.height);
+    mask.forEach((selected, index) => {
+      if (selected) target.data.set(image.data.subarray(index * 4, index * 4 + 4), index * 4);
+    });
+    context.putImageData(target, x, y);
+  }
+
+  function selectPixelsAt(pixels: SelectionPixels, x: number, y: number) {
+    let mask: Uint8Array | null = null;
+    if (pixels.mask) {
+      mask = new Uint8Array(frame.width * frame.height);
+      for (let row = 0; row < pixels.image.height; row++) for (let column = 0; column < pixels.image.width; column++) {
+        mask[(y + row) * frame.width + x + column] = pixels.mask[row * pixels.image.width + column];
+      }
+    }
+    updateSelection({ x, y, width: pixels.image.width, height: pixels.image.height }, mask);
+  }
+
   function copySelection(merged = false) {
     const region = selectionRef.current;
     const context = (merged ? canvasRef.current : sourceRef.current.get(activeLayer))?.getContext('2d');
     if (!ready.current || drawing.current || !region || !context) return;
-    selectionClipboard.current = context.getImageData(region.x, region.y, region.width, region.height);
+    selectionClipboard.current = selectedPixels(context, region);
     onClipboardChange?.(true);
   }
 
@@ -374,9 +452,9 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     const region = selectionRef.current;
     const context = selectionContext();
     if (!region || !context) return;
-    selectionClipboard.current = context.getImageData(region.x, region.y, region.width, region.height);
+    selectionClipboard.current = selectedPixels(context, region);
     onClipboardChange?.(true);
-    context.clearRect(region.x, region.y, region.width, region.height);
+    clearSelectedPixels(context, region);
     drawRef.current();
     emitChange();
   }
@@ -385,7 +463,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     const region = selectionRef.current;
     const context = selectionContext();
     if (!region || !context) return;
-    context.clearRect(region.x, region.y, region.width, region.height);
+    clearSelectedPixels(context, region);
     drawRef.current();
     emitChange();
   }
@@ -393,22 +471,27 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
   function pasteSelection() {
     const clipboard = selectionClipboard.current;
     const context = selectionContext();
-    if (!clipboard || !context) return;
+    if (!clipboard || !context) return false;
     const current = selectionRef.current;
     const x = current?.x ?? 0;
     const y = current?.y ?? 0;
-    const width = Math.min(clipboard.width, frame.width - x);
-    const height = Math.min(clipboard.height, frame.height - y);
-    if (width <= 0 || height <= 0) return;
-    const cropped = cropImageData(clipboard, width, height);
-    context.putImageData(cropped, x, y);
-    updateSelection({ x, y, width, height });
+    const width = Math.min(clipboard.image.width, frame.width - x);
+    const height = Math.min(clipboard.image.height, frame.height - y);
+    if (width <= 0 || height <= 0) return false;
+    const cropped = mapSelectionPixels(clipboard, image => cropImageData(image, width, height));
+    putSelectedPixels(context, cropped, x, y);
+    selectPixelsAt(cropped, x, y);
     drawRef.current();
     emitChange();
+    return true;
   }
 
   async function pasteSystemImage() {
-    if (!navigator.clipboard?.read) return false;
+    if (!navigator.clipboard?.read || !selectionContext()) return false;
+    // Clipboard reads and image decoding are async. Do not apply the result to a
+    // different frame, layer or version if the user navigates while they finish.
+    const target = sourceRef.current.get(activeLayer);
+    const source = sourceFiles.current.get(activeLayer);
     try {
       const items = await navigator.clipboard.read();
       for (const item of items) {
@@ -417,14 +500,14 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
         const url = URL.createObjectURL(await item.getType(type));
         try {
           const image = await loadImage(url);
+          if (!mounted.current || currentTarget.current.frame !== frame || currentTarget.current.activeLayer !== activeLayer || currentTarget.current.readonly || !selectionContext() || sourceRef.current.get(activeLayer) !== target || sourceFiles.current.get(activeLayer) !== source) return false;
           const buffer = document.createElement('canvas');
           buffer.width = Math.min(frame.width, image.width);
           buffer.height = Math.min(frame.height, image.height);
-          buffer.getContext('2d')!.drawImage(image, 0, 0, buffer.width, buffer.height);
-          selectionClipboard.current = buffer.getContext('2d')!.getImageData(0, 0, buffer.width, buffer.height);
+          buffer.getContext('2d')!.drawImage(image, 0, 0);
+          selectionClipboard.current = { image: buffer.getContext('2d')!.getImageData(0, 0, buffer.width, buffer.height), mask: null };
           onClipboardChange?.(true);
-          pasteSelection();
-          return true;
+          return pasteSelection();
         } finally { URL.revokeObjectURL(url); }
       }
     } catch { return false; }
@@ -438,28 +521,25 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     const nextX = Math.max(0, Math.min(frame.width - region.width, region.x + dx));
     const nextY = Math.max(0, Math.min(frame.height - region.height, region.y + dy));
     if (nextX === region.x && nextY === region.y) return;
-    const image = context.getImageData(region.x, region.y, region.width, region.height);
-    context.clearRect(region.x, region.y, region.width, region.height);
-    context.putImageData(image, nextX, nextY);
-    updateSelection({ ...region, x: nextX, y: nextY });
+    const pixels = selectedPixels(context, region);
+    clearSelectedPixels(context, region);
+    putSelectedPixels(context, pixels, nextX, nextY);
+    selectPixelsAt(pixels, nextX, nextY);
     drawRef.current();
     emitChange();
   }
 
-  function replaceSelection(image: ImageData, x?: number, y?: number) {
+  function replaceSelection(pixels: SelectionPixels) {
     const region = selectionRef.current;
     const context = selectionContext();
+    const { image } = pixels;
     if (!region || !context || image.width > frame.width || image.height > frame.height) return;
-    const next = {
-      x: Math.max(0, Math.min(frame.width - image.width, x ?? Math.floor(region.x + (region.width - image.width) / 2))),
-      y: Math.max(0, Math.min(frame.height - image.height, y ?? Math.floor(region.y + (region.height - image.height) / 2))),
-      width: image.width,
-      height: image.height,
-    };
+    const x = Math.max(0, Math.min(frame.width - image.width, Math.floor(region.x + (region.width - image.width) / 2)));
+    const y = Math.max(0, Math.min(frame.height - image.height, Math.floor(region.y + (region.height - image.height) / 2)));
     const before = context.getImageData(0, 0, frame.width, frame.height);
-    context.clearRect(region.x, region.y, region.width, region.height);
-    context.putImageData(image, next.x, next.y);
-    updateSelection(next);
+    clearSelectedPixels(context, region);
+    putSelectedPixels(context, pixels, x, y);
+    selectPixelsAt(pixels, x, y);
     const after = context.getImageData(0, 0, frame.width, frame.height);
     if (before.data.every((value, index) => value === after.data[index])) return;
     drawRef.current();
@@ -470,7 +550,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     const region = selectionRef.current;
     const context = selectionContext();
     if (!region || !context) return;
-    replaceSelection(transformSelectionPixels(context.getImageData(region.x, region.y, region.width, region.height), transform));
+    replaceSelection(mapSelectionPixels(selectedPixels(context, region), image => transformSelectionPixels(image, transform)));
   }
 
   function resizeSelection(width: number, height: number) {
@@ -478,7 +558,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     const context = selectionContext();
     if (!region || !context || !Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > frame.width || height > frame.height) return;
     if (width === region.width && height === region.height) return;
-    replaceSelection(resizeSelectionPixels(context.getImageData(region.x, region.y, region.width, region.height), width, height));
+    replaceSelection(mapSelectionPixels(selectedPixels(context, region), image => resizeSelectionPixels(image, width, height)));
   }
 
   function positionSelection(x: number, y: number) {
@@ -507,7 +587,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
       setCursor(null);
     },
     panBy,
-  }), [frame, layers, activeLayer, readonly, zoom]);
+  }));
 
   drawRef.current = () => {
     const context = canvasRef.current?.getContext('2d');
@@ -792,13 +872,13 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     const context = sourceRef.current.get(activeLayer)?.getContext('2d');
     if (!context) return;
     context.imageSmoothingEnabled = false;
-    if (tool === 'lasso') {
+    if (tool === 'lasso' && !selectionMoving.current) {
       lassoPath.current.push(point);
       selectLasso();
       drawRef.current();
       return;
     }
-    if ((tool === 'select' || tool === 'color-select' || tool === 'magic-wand') && selectionMoving.current) {
+    if (selectionMoving.current) {
       const buffer = selectionMoveBuffer.current;
       const origin = selectionMoveOrigin.current;
       const pointer = selectionMoveStart.current;
@@ -807,9 +887,9 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
         context.putImageData(base, 0, 0);
         const dx = Math.max(-origin.x, Math.min(frame.width - origin.x - origin.width, Math.round((event.clientX - pointer[0]) / zoom)));
         const dy = Math.max(-origin.y, Math.min(frame.height - origin.y - origin.height, Math.round((event.clientY - pointer[1]) / zoom)));
-        context.clearRect(origin.x, origin.y, origin.width, origin.height);
-        context.putImageData(buffer, origin.x + dx, origin.y + dy);
-        updateSelection({ ...origin, x: origin.x + dx, y: origin.y + dy });
+        clearSelectedPixels(context, origin, selectionMoveMask.current);
+        putSelectedPixels(context, buffer, origin.x + dx, origin.y + dy);
+        selectPixelsAt(buffer, origin.x + dx, origin.y + dy);
         changed.current = dx !== 0 || dy !== 0;
       }
       drawRef.current();
@@ -855,6 +935,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     drawRef.current();
   }
   function finish(cancelled = false) {
+    finishGuide(cancelled);
     onStrokeStateChange?.(false);
     if (panDrawing.current) {
       panDrawing.current = false;
@@ -884,7 +965,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
         context.putImageData(selectionSnapshot.current, 0, 0);
         drawRef.current();
       }
-      if (selectionMoveOrigin.current) updateSelection(selectionMoveOrigin.current);
+      if (selectionMoveOrigin.current) updateSelection(selectionMoveOrigin.current, selectionMoveMask.current);
       changed.current = false;
     }
     previous.current = null;
@@ -902,6 +983,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
     selectionMoving.current = false;
     selectionSnapshot.current = null;
     selectionMoveBuffer.current = null;
+    selectionMoveMask.current = null;
     selectionMoveStart.current = null;
     selectionMoveOrigin.current = null;
     start.current = null;
@@ -915,6 +997,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
       if (drawing.current && shapePointer.current && (event.key === 'Shift' || event.key === 'Alt')) {
         previewShape(shapePointer.current, event.shiftKey, event.altKey);
       }
+      if (event.type === 'keydown' && event.key === 'Escape' && guideDrag.current) { event.preventDefault(); finishGuide(true); }
       if (event.type === 'keydown' && event.key === 'Escape' && drawing.current && (moveBuffer.current || selectionMoving.current || snapshot.current)) {
         event.preventDefault();
         finish(true);
@@ -936,6 +1019,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
       window.removeEventListener('keyup', cancelMove);
     };
   }, [frame, activeLayer, tool, readonly, shapeStrokeSize, shapeMode]);
+  const guideMetadata = guidePreview ?? frame;
   const selected = layers.find((layer) => layer.id === activeLayer);
   const region = finding?.frameId === frame.id ? finding.region : null;
   const gridLineColor = (() => {
@@ -1012,11 +1096,13 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
               if (data && data[3] > 0) onPickColor?.(rgbaToHex(data, 0), Math.round(data[3] / 2.55));
               return;
             }
-            if (tool === 'color-select' || tool === 'magic-wand') {
+            const current = selectionRef.current;
+            const insideSelection = !!current && point[0] >= current.x && point[0] < current.x + current.width && point[1] >= current.y && point[1] < current.y + current.height && (!selectionMaskRef.current || selectionMaskRef.current[point[1] * frame.width + point[0]] === 1);
+            if ((tool === 'color-select' || tool === 'magic-wand') && !insideSelection) {
               selectByColor(point, tool === 'magic-wand');
               return;
             }
-            if (tool === 'lasso') {
+            if (tool === 'lasso' && !insideSelection) {
               onStrokeStateChange?.(true);
               drawing.current = true;
               start.current = point;
@@ -1024,10 +1110,9 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
               updateSelection(normalizeRect(point, point));
               return;
             }
-            if (tool === 'select') {
+            if (['select', 'lasso', 'color-select', 'magic-wand'].includes(tool)) {
               onStrokeStateChange?.(true);
-              const current = selectionRef.current;
-              if (current && point[0] >= current.x && point[0] < current.x + current.width && point[1] >= current.y && point[1] < current.y + current.height && selected && !selected.locked && !selected.pixelsLocked && selected.visible) {
+              if (current && insideSelection && selected && !selected.locked && !selected.pixelsLocked && selected.visible) {
                 const context = sourceRef.current.get(activeLayer)?.getContext('2d');
                 if (context) {
                   drawing.current = true;
@@ -1037,7 +1122,8 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
                   selectionMoving.current = true;
                   selectionMoveOrigin.current = current;
                   selectionMoveStart.current = [event.clientX, event.clientY];
-                  selectionMoveBuffer.current = context.getImageData(current.x, current.y, current.width, current.height);
+                  selectionMoveBuffer.current = selectedPixels(context, current);
+                  selectionMoveMask.current = selectionMaskRef.current?.slice() ?? null;
                   selectionSnapshot.current = context.getImageData(0, 0, frame.width, frame.height);
                 }
               } else {
@@ -1091,7 +1177,7 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
           onPointerUp={event => {
             if (event.pointerId !== capturedPointer.current || event.button === 2) return;
             paint(event);
-            if (tool === 'lasso') selectLasso();
+            if (tool === 'lasso' && !selectionMoving.current) selectLasso();
             finish();
             capturedPointer.current = null;
             if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -1118,22 +1204,23 @@ export const CanvasEditor = forwardRef<CanvasEditorHandle, Props>(function Canva
             }}
           />
         ) : null}
-        {guides && frame.origin ? (
+        {guides && guideMetadata.origin ? (
           <>
-            <div className="origin-guide-x" style={{ left: frame.origin.x * zoom }} />
-            <div className="origin-guide-y" style={{ top: frame.origin.y * zoom }} />
+            <div className="origin-guide-x" style={{ left: guideMetadata.origin.x * zoom }} />
+            <div className="origin-guide-y" style={{ top: guideMetadata.origin.y * zoom }} />
             <span
               className="origin-marker"
               aria-label="帧原点标记"
-              title={`原点 ${frame.origin.x}, ${frame.origin.y}`}
-              style={{ left: frame.origin.x * zoom, top: frame.origin.y * zoom }}
-              onPointerDown={event => { event.preventDefault(); event.stopPropagation(); guideDrag.current = 'origin'; }}
+              title={`原点 ${guideMetadata.origin.x}, ${guideMetadata.origin.y}`}
+              style={{ left: guideMetadata.origin.x * zoom, top: guideMetadata.origin.y * zoom }}
+              onPointerDown={event => startGuide(event, 'origin')}
+              onLostPointerCapture={() => finishGuide(true)}
             />
           </>
         ) : null}
-        {guides && frame.baselineY !== null ? (
-          <div className="baseline-guide" style={{ top: frame.baselineY * zoom }}>
-            <span onPointerDown={event => { event.preventDefault(); event.stopPropagation(); guideDrag.current = 'baseline'; }}>基线 {frame.baselineY}</span>
+        {guides && guideMetadata.baselineY !== null ? (
+          <div className="baseline-guide" style={{ top: guideMetadata.baselineY * zoom }}>
+            <span aria-label="拖动基线参考线" onPointerDown={event => startGuide(event, 'baseline')} onLostPointerCapture={() => finishGuide(true)}>基线 {guideMetadata.baselineY}</span>
           </div>
         ) : null}
         {guides ? frame.collisionRects.map((rect, index) => <div key={index} className="collision-region" aria-label={`碰撞框 ${index + 1}`} style={{ left: rect.x * zoom, top: rect.y * zoom, width: rect.width * zoom, height: rect.height * zoom }} />) : null}

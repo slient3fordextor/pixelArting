@@ -5,7 +5,7 @@ from typing import Annotated, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, RootModel, TypeAdapter, WithJsonSchema, model_serializer
 
 from .mcp_contract import ContractModel, ToolFailure
-from .models import CheckConfig, Document, Point, Rect, RepairAction
+from .models import CheckConfig, Document, Point, Rect, RepairAction, ProjectCreate, RenameAssetRequest
 
 T = TypeVar('T')
 
@@ -177,6 +177,8 @@ def inline_schema(schema):
 
 # Keep validation inside each tool's sanitized error boundary. Publishing the
 # precise schema does not make SDK validation echo rejected pixel/config inputs.
+ProjectNameInput = Annotated[str, WithJsonSchema(ProjectCreate.model_json_schema()["properties"]["name"])]
+AssetNameInput = Annotated[str, WithJsonSchema(RenameAssetRequest.model_json_schema()["properties"]["name"])]
 DocumentInput = Annotated[dict, WithJsonSchema(inline_schema(Document.model_json_schema()))]
 ConfigInput = Annotated[dict, WithJsonSchema(inline_schema(CheckConfig.model_json_schema()))]
 ActionsInput = Annotated[list[dict], WithJsonSchema({**inline_schema(TypeAdapter(list[RepairAction]).json_schema()), 'minItems': 1, 'maxItems': 5})]

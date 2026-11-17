@@ -50,14 +50,16 @@ async function startBackend({ root, python, dataRoot, portFile, frontendPort, on
   let port = readPersistedPort(persistedPortFile);
   if (!port || !(await portAvailable(port))) port = await freePort();
   const url = `http://127.0.0.1:${port}`;
-  const child = spawn(python, ['-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', String(port)], {
+  const child = spawn(python, ['-m', 'backend.desktop_runtime', '--port', String(port)], {
     cwd: root,
     windowsHide: true,
     env: { ...process.env, PIXELART_DESKTOP_PORT: String(port), ...(frontendPort ? { PIXELART_DESKTOP_FRONTEND_PORT: String(frontendPort) } : {}), ...(dataRoot ? { PIXELART_DATA_DIR: dataRoot } : {}) },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
   let logs = '', stopped = false, ready = false, spawnError;
   const log = chunk => { logs = (logs + chunk.toString()).slice(-8192); };
+  // Closing this pipe (also on owner crash) tells Python to shut down.
+  child.stdin.on('error', () => {});
   child.stdout.on('data', log);
   child.stderr.on('data', log);
   child.on('error', error => { spawnError = error; });
@@ -69,6 +71,7 @@ async function startBackend({ root, python, dataRoot, portFile, frontendPort, on
     if (stopped) return;
     stopped = true;
     if (child.exitCode !== null || child.signalCode !== null || spawnError) return;
+    child.stdin.end();
     child.kill();
     const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
     timer.unref();

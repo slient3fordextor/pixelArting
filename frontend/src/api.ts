@@ -1,13 +1,17 @@
-export async function api<T>(path: string, body?: unknown, method: 'POST' | 'DELETE' | 'PUT' = 'POST'): Promise<T> {
+export async function apiWithMetadata<T>(path: string, body?: unknown, method: 'POST' | 'DELETE' | 'PUT' = 'POST', headers: Record<string, string> = {}): Promise<{ data: T; etag: string | null }> {
   const response = await fetch(`/api${path}`, body === undefined ? undefined : {
-    method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method, headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
   });
   if (!response.ok) {
     const result = await response.json().catch(() => null);
     const detail = result?.detail;
     throw new Error(typeof detail === 'string' ? detail : Array.isArray(detail) ? detail.map((e: { msg: string }) => e.msg).join('；') : `请求失败 (${response.status})`);
   }
-  return response.json();
+  return { data: await response.json(), etag: response.headers.get('ETag') };
+}
+
+export async function api<T>(path: string, body?: unknown, method: 'POST' | 'DELETE' | 'PUT' = 'POST'): Promise<T> {
+  return (await apiWithMetadata<T>(path, body, method)).data;
 }
 
 export function loadImage(source: string): Promise<HTMLImageElement> {

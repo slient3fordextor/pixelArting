@@ -94,7 +94,10 @@ def composite(document: Document, frame: Frame) -> Image.Image:
         else: blended = cb + cs - 2 * cb * cs
         sa, da = source[:, :, 3:4], base[:, :, 3:4]
         out_a = sa + da * (1 - sa)
-        out_rgb = np.divide(blended * sa + cb * da * (1 - sa), np.maximum(out_a, 1e-6))
+        # Blend only where the backdrop exists. On transparent pixels the
+        # source color must survive unchanged, just as in Canvas source-over.
+        source_color = (1 - da) * cs + da * blended
+        out_rgb = np.divide(source_color * sa + cb * da * (1 - sa), np.maximum(out_a, 1e-6))
         result = Image.fromarray(np.uint8(np.clip(np.concatenate([out_rgb, out_a], axis=2) * 255 + .5, 0, 255)), "RGBA")
     return result
 

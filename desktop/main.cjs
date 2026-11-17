@@ -4,6 +4,7 @@ const { spawn } = require('node:child_process');
 const { setTimeout: delay } = require('node:timers/promises');
 const path = require('node:path');
 const { freePort, startBackend } = require('./backend.cjs');
+const { canReadClipboard } = require('./permissions.cjs');
 const { DESKTOP_SCHEME, DESKTOP_URL, createProtocolHandler } = require('./protocol.cjs');
 
 protocol.registerSchemesAsPrivileged([{ scheme: DESKTOP_SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
@@ -136,8 +137,11 @@ if (!app.requestSingleInstanceLock()) {
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true },
     });
     Menu.setApplicationMenu(menu());
-    mainWindow.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-    mainWindow.webContents.session.setPermissionCheckHandler(() => false);
+    const clipboardAllowed = (contents, permission, origin, details) =>
+      canReadClipboard(contents, permission, origin, details, mainWindow?.webContents, frontendDev?.origin);
+    mainWindow.webContents.session.setPermissionRequestHandler((contents, permission, callback, details) =>
+      callback(clipboardAllowed(contents, permission, details.requestingUrl, details)));
+    mainWindow.webContents.session.setPermissionCheckHandler(clipboardAllowed);
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     mainWindow.webContents.on('context-menu', (_event, params) => {
       if (!params.isEditable) return;

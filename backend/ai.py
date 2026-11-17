@@ -15,6 +15,7 @@ import httpx
 from .models import AiGenerationCandidate, AiGenerationRequest, AiProviderConfig, DrawingCommand
 
 MAX_PROVIDER_BYTES = 32 * 1024 * 1024
+MAX_PROVIDER_ERROR_BYTES = 64 * 1024
 
 
 class AiProviderError(Exception):
@@ -151,7 +152,20 @@ class OpenAICompatibleProvider:
                     else:
                         watcher = None
                     try:
-                        response.raise_for_status()
+                        if not response.is_success:
+                            # Streaming responses have no .text until consumed. Read
+                            # only a bounded prefix while the stream is still open;
+                            # error payloads may echo secrets and are never returned.
+                            error_body = bytearray()
+                            for chunk in response.iter_bytes(chunk_size=8192):
+                                if cancel_event is not None and cancel_event.is_set():
+                                    raise AiProviderError("AI 生成已取消", "cancelled")
+                                if time.monotonic() > deadline:
+                                    break
+                                error_body.extend(chunk[:MAX_PROVIDER_ERROR_BYTES - len(error_body)])
+                                if len(error_body) >= MAX_PROVIDER_ERROR_BYTES:
+                                    break
+                            raise self._status_error(response.status_code, bytes(error_body))
                         chunks, size = [], 0
                         for chunk in response.iter_bytes():
                             if cancel_event is not None and cancel_event.is_set():
@@ -171,28 +185,6 @@ class OpenAICompatibleProvider:
             if cancel_event is not None and cancel_event.is_set():
                 raise AiProviderError("AI 生成已取消", "cancelled") from error
             raise AiProviderError("AI 服务请求失败，请检查服务地址、模型和网络", "address_error") from error
-        except httpx.HTTPStatusError as error:
-            messages = {
-                401: "AI 服务身份验证失败，请检查 API Key",
-                403: "AI 服务拒绝访问，请检查模型权限",
-                404: "AI 服务地址或模型不存在，请检查配置",
-                429: "AI 服务额度不足或请求过多，请稍后重试",
-            }
-            status = error.response.status_code
-            body = error.response.text.lower()
-            model_error = any(token in body for token in ("model", "deployment", "engine"))
-            category = {
-                401: "auth_error", 403: "auth_error", 404: "model_not_found" if model_error else "unsupported_interface",
-                405: "unsupported_interface", 408: "timeout", 429: "rate_limited", 501: "unsupported_interface",
-            }.get(status, "provider_error")
-            if 500 <= status <= 599:
-                category = "transient_error"
-            detail = messages.get(status, "AI 服务返回错误，请稍后重试")
-            if category == "unsupported_interface":
-                detail = "AI 服务不支持所需接口，请检查服务兼容性"
-            elif category == "model_not_found":
-                detail = "AI 服务中不存在指定模型，请检查模型名称"
-            raise AiProviderError(f"{detail} (HTTP {status})", category) from error
         except httpx.TimeoutException as error:
             raise AiProviderError("AI 服务请求超时，请稍后重试", "timeout") from error
         except (httpx.ConnectError, httpx.UnsupportedProtocol, httpx.InvalidURL) as error:
@@ -206,6 +198,27 @@ class OpenAICompatibleProvider:
         if not isinstance(value, dict):
             raise AiProviderError("AI 服务返回格式无效")
         return value
+
+    @staticmethod
+    def _status_error(status: int, body: bytes) -> AiProviderError:
+        messages = {
+            401: "AI 服务身份验证失败，请检查 API Key",
+            403: "AI 服务拒绝访问，请检查模型权限",
+            404: "AI 服务地址或模型不存在，请检查配置",
+            429: "AI 服务额度不足或请求过多，请稍后重试",
+        }
+        text = body.decode("utf-8", errors="replace").lower()
+        model_error = any(token in text for token in ("model", "deployment", "engine"))
+        category = {
+            401: "auth_error", 403: "auth_error", 404: "model_not_found" if model_error else "unsupported_interface",
+            405: "unsupported_interface", 408: "timeout", 429: "rate_limited", 501: "unsupported_interface",
+        }.get(status, "transient_error" if 500 <= status <= 599 else "provider_error")
+        detail = messages.get(status, "AI 服务返回错误，请稍后重试")
+        if category == "unsupported_interface":
+            detail = "AI 服务不支持所需接口，请检查服务兼容性"
+        elif category == "model_not_found":
+            detail = "AI 服务中不存在指定模型，请检查模型名称"
+        return AiProviderError(f"{detail} (HTTP {status})", category)
 
     def generate_text(self, request: AiGenerationRequest, cancel_event: threading.Event | None = None) -> dict[str, Any]:
         model = request.model or self.config.textModel

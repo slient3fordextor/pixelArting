@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .images import checksum, validate_images
-from .models import AiConfigUpdate, AiGeneration, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, AiProviderConfig, CheckConfig, Document
+from .models import AiConfigUpdate, AiGeneration, AiGenerationRequest, AiProfileCreate, AiProfileUpdate, AiProviderConfig, CheckConfig, Document, ProjectCreate, RenameAssetRequest
 from .secrets import SecretStore
 
 
@@ -26,6 +26,14 @@ def _document_api_payload(document: Document) -> dict:
         if layer.get("groupId") is None:
             layer.pop("groupId", None)
     return payload
+
+
+def _validated_document(document: Document) -> Document:
+    """Revalidate mutable model instances before they cross a persistence boundary."""
+    validated = Document.model_validate(document.model_dump())
+    validated.validate_storage_budget()
+    validate_images(validated)
+    return validated
 
 
 def uid() -> str:
@@ -164,6 +172,21 @@ class Store:
         finally:
             connection.close()
 
+    @contextmanager
+    def transaction(self):
+        """Share one write transaction across a synchronous application operation."""
+        borrowed = getattr(self._transaction, "connection", None)
+        if borrowed is not None:
+            yield borrowed
+            return
+        with self.connection() as connection:
+            self._begin_immediate(connection)
+            self._transaction.connection = connection
+            try:
+                yield connection
+            finally:
+                del self._transaction.connection
+
     @staticmethod
     def _begin_immediate(connection):
         if not connection.in_transaction:
@@ -233,7 +256,7 @@ class Store:
         return self._config_for_storage_name(self._secret_name(profile_id), config)
 
     def _migrate_ai_secrets(self):
-        with self.connection() as conn:
+        with self.transaction() as conn:
             rows = conn.execute("SELECT id,config FROM ai_provider_profiles").fetchall()
             active = conn.execute("SELECT active_id FROM ai_provider_state WHERE id=1").fetchone()
             legacy = conn.execute("SELECT config FROM ai_provider_config WHERE id=1").fetchone()
@@ -270,6 +293,7 @@ class Store:
                 conn.execute("UPDATE ai_generations SET provider_config=?,provider_secret=? WHERE id=?", (stored.model_dump_json(), persisted_secret, generation["id"]))
 
     def project(self, name: str) -> dict:
+        name = ProjectCreate(name=name).name
         project = {"id": uid(), "name": name, "created": now()}
         with self.connection() as conn:
             conn.execute("INSERT INTO projects VALUES (:id,:name,:created)", project)
@@ -299,43 +323,50 @@ class Store:
         return row
 
     def ai_config(self) -> AiProviderConfig:
-        """Return a copy of the currently active provider configuration."""
-        row = self._active_profile_row()
-        return self._profile_config(row)
+        """Return one coherent snapshot of the active provider and its key."""
+        return self.ai_provider_snapshot()[1]
 
     def active_ai_profile_id(self) -> str:
         row = self._active_profile_row()
         return row["id"]
 
     def ai_provider_snapshot(self) -> tuple[str, AiProviderConfig]:
-        row = self._active_profile_row()
-        return row["id"], self._profile_config(row)
+        # Profile changes also update the external keyring. Hold the workspace
+        # write lock until both database fields and the referenced key are read.
+        with self.transaction():
+            row = self._active_profile_row()
+            return row["id"], self._profile_config(row)
 
     def ai_config_profile(self) -> dict:
-        row = self._active_profile_row()
-        config = self._profile_config(row)
-        return self._profile_public(row["id"], row["name"], config, row["created"], row["updated"])
+        with self.transaction():
+            row = self._active_profile_row()
+            config = self._profile_config(row)
+            return self._profile_public(row["id"], row["name"], config, row["created"], row["updated"])
 
     @staticmethod
     def public_ai_config(config: AiProviderConfig) -> dict:
         return {**config.model_dump(exclude={"apiKey"}), "hasApiKey": bool(config.apiKey)}
 
-    def save_ai_config(self, update: AiConfigUpdate) -> dict:
-        current = self.ai_config()
-        fields = update.model_dump(exclude_none=True, exclude={"clearApiKey"})
+    @staticmethod
+    def _updated_ai_config(current: AiProviderConfig, update: AiConfigUpdate) -> AiProviderConfig:
+        fields = update.model_dump(exclude_none=True, exclude={"name", "clearApiKey"})
         # A blank key means "keep existing"; clearing is an explicit action.
         if not fields.get("apiKey"):
             fields.pop("apiKey", None)
         if update.clearApiKey:
             fields["apiKey"] = None
-        config = AiProviderConfig.model_validate({**current.model_dump(), **fields})
-        result = self._save_profile_config(self._active_profile_row()["id"], config)
-        return result
+        return AiProviderConfig.model_validate({**current.model_dump(), **fields})
+
+    def save_ai_config(self, update: AiConfigUpdate) -> dict:
+        with self.transaction():
+            row = self._active_profile_row()
+            config = self._updated_ai_config(self._profile_config(row), update)
+            return self._save_profile_config(row["id"], config)
 
     def _save_profile_config(self, profile_id: str, config: AiProviderConfig, name: str | None = None) -> dict:
         self.db.chmod(0o600)
         updated = now()
-        with self.connection() as conn:
+        with self.transaction() as conn:
             row = conn.execute("SELECT * FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
             if not row:
                 raise KeyError("AI 配置档案不存在")
@@ -360,7 +391,7 @@ class Store:
             sidecar = Path(str(self.db) + suffix)
             if sidecar.exists():
                 sidecar.chmod(0o600)
-        return self._profile_public(profile_id, profile_name.strip(), self._profile_config({"id": profile_id, "config": stored_config.model_dump_json()}), row["created"], updated)
+        return self._profile_public(profile_id, profile_name.strip(), config, row["created"], updated)
 
     def list_ai_profiles(self) -> dict:
         with self.connection() as conn:
@@ -383,37 +414,29 @@ class Store:
             fields["apiKey"] = None
         config = AiProviderConfig.model_validate({**AiProviderConfig().model_dump(), **fields})
         profile_id, created = uid(), now()
-        stored_config = self._config_for_storage(profile_id, config)
         name = body.name.strip()
-        with self.connection() as conn:
+        with self.transaction() as conn:
             if conn.execute("SELECT id FROM ai_provider_profiles WHERE name=? COLLATE NOCASE", (name,)).fetchone():
                 raise Conflict("AI 配置名称已存在")
             count = conn.execute("SELECT COUNT(*) FROM ai_provider_profiles").fetchone()[0]
             if count >= 32:
                 raise Conflict("AI 配置档案数量已达到上限")
+            stored_config = self._config_for_storage(profile_id, config)
             conn.execute("INSERT INTO ai_provider_profiles VALUES(?,?,?,?,?)", (profile_id, name, stored_config.model_dump_json(), created, created))
         self.db.chmod(0o600)
-        return self._profile_public(profile_id, name, self._profile_config({"id": profile_id, "config": stored_config.model_dump_json()}), created, created)
+        return self._profile_public(profile_id, name, config, created, created)
 
     def update_ai_profile(self, profile_id: str, body: AiProfileUpdate) -> dict:
-        with self.connection() as conn:
-            row = conn.execute("SELECT config FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
-        if not row:
-            raise KeyError("AI 配置档案不存在")
-        try:
-            current = self._profile_config({"id": profile_id, "config": row["config"]})
-        except ValueError as error:
-            raise ValueError("AI 配置损坏，请重新保存配置") from error
-        fields = body.model_dump(exclude_none=True, exclude={"name", "clearApiKey"})
-        if not fields.get("apiKey"):
-            fields.pop("apiKey", None)
-        if body.clearApiKey:
-            fields["apiKey"] = None
-        config = AiProviderConfig.model_validate({**current.model_dump(), **fields})
-        return self._save_profile_config(profile_id, config, body.name)
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
+            if not row:
+                raise KeyError("AI 配置档案不存在")
+            current = self._profile_config(row)
+            config = self._updated_ai_config(current, body)
+            return self._save_profile_config(profile_id, config, body.name)
 
     def activate_ai_profile(self, profile_id: str) -> dict:
-        with self.connection() as conn:
+        with self.transaction() as conn:
             row = conn.execute("SELECT id FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
             if not row:
                 raise KeyError("AI 配置档案不存在")
@@ -423,10 +446,10 @@ class Store:
             stored_config = self._config_for_storage(profile_id, config)
             conn.execute("UPDATE ai_provider_profiles SET config=? WHERE id=?", (stored_config.model_dump_json(), profile_id))
             conn.execute("INSERT INTO ai_provider_config(id,config,updated) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config,updated=excluded.updated", (stored_config.model_dump_json(), now()))
-        return {"activeId": profile_id, "profile": self._profile_public(profile_id, profile["name"], self._profile_config({"id": profile_id, "config": stored_config.model_dump_json()}), profile["created"], profile["updated"])}
+        return {"activeId": profile_id, "profile": self._profile_public(profile_id, profile["name"], config, profile["created"], profile["updated"])}
 
     def delete_ai_profile(self, profile_id: str):
-        with self.connection() as conn:
+        with self.transaction() as conn:
             row = conn.execute("SELECT id FROM ai_provider_profiles WHERE id=?", (profile_id,)).fetchone()
             if not row:
                 raise KeyError("AI 配置档案不存在")
@@ -555,7 +578,7 @@ class Store:
         return self.generation(generation_id)
 
     def select_ai_candidate(self, generation_id: str, candidate_id: str, project_id: str, document: Document):
-        validate_images(document)
+        document = _validated_document(document)
         asset_id, version_id = uid(), uid()
         with self.connection() as conn:
             self._begin_immediate(conn)
@@ -580,6 +603,7 @@ class Store:
                     raise Conflict("已淘汰的候选不能导入")
                 imported = document.model_copy(deep=True)
                 imported.name = self._unique_name(conn, project_id, imported.name)
+                imported = _validated_document(imported)
                 created = now()
                 conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project_id, imported.name, version_id, created))
                 conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "ai-import", imported.model_dump_json(), checksum(imported), created))
@@ -656,9 +680,7 @@ class Store:
             return [dict(row) for row in conn.execute("SELECT * FROM projects ORDER BY created")]
 
     def rename_project(self, project_id: str, expected_name: str, name: str):
-        name = name.strip()
-        if not name or len(name) > 80:
-            raise ValueError("项目名称必须为 1 到 80 个字符")
+        name = ProjectCreate(name=name).name
         with self.connection() as conn:
             self._begin_immediate(conn)
             row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -708,10 +730,23 @@ class Store:
             )
             return config
 
-    def save_project_config(self, project_id: str, config: CheckConfig) -> CheckConfig:
-        with self.connection() as conn:
-            if not conn.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone():
-                raise KeyError("项目不存在")
+    @staticmethod
+    def config_hash(config: CheckConfig) -> str:
+        canonical = json.dumps(config.model_dump(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def project_config_snapshot(self, project_id: str) -> tuple[CheckConfig, str]:
+        config = self.project_config(project_id)
+        return config, self.config_hash(config)
+
+    def save_project_config(self, project_id: str, config: CheckConfig, expected_config_hash: str | None = None) -> CheckConfig:
+        config = CheckConfig.model_validate(config.model_dump())
+        if expected_config_hash is not None and re.fullmatch(r"[0-9a-f]{64}", expected_config_hash) is None:
+            raise ValueError("配置版本标识无效")
+        with self.transaction() as conn:
+            current = self.project_config(project_id)
+            if expected_config_hash is not None and self.config_hash(current) != expected_config_hash:
+                raise Conflict("项目配置已变化，请重新载入后再保存")
             conn.execute(
                 "INSERT INTO project_configs(project_id, config, updated) VALUES (?,?,?) "
                 "ON CONFLICT(project_id) DO UPDATE SET config=excluded.config, updated=excluded.updated",
@@ -811,7 +846,7 @@ class Store:
             conn.execute("DELETE FROM assets WHERE id=?", (asset_id,))
 
     def create_asset(self, project_id: str, document: Document):
-        validate_images(document)
+        document = _validated_document(document)
         digest = checksum(document)
         asset_id, version_id = uid(), uid()
         with self.connection() as conn:
@@ -828,6 +863,7 @@ class Store:
             raise KeyError("项目不存在")
         imported = document.model_copy(deep=True)
         imported.name = self._unique_name(conn, project_id, imported.name)
+        imported = _validated_document(imported)
         digest = checksum(imported)
         created = now()
         conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project_id, imported.name, version_id, created))
@@ -835,7 +871,7 @@ class Store:
         return {"assetId": asset_id, "projectId": project_id, "versionId": version_id, "name": imported.name}
 
     def import_asset(self, project_id: str, document: Document):
-        validate_images(document)
+        document = _validated_document(document)
         with self.connection() as conn:
             self._begin_immediate(conn)
             receipt = self._insert_import(conn, project_id, document)
@@ -869,7 +905,7 @@ class Store:
         The MCP adapter fingerprints canonical options and the uploaded byte digest.
         """
         self._validate_import_key(request_key, fingerprint)
-        validate_images(document)
+        document = _validated_document(document)
         with self.connection() as conn:
             self._begin_immediate(conn)
             previous = self._import_receipt(conn, project_id, request_key, fingerprint)
@@ -910,7 +946,7 @@ class Store:
     def _prepare_project_documents(documents: list[Document]):
         prepared = []
         for document in documents:
-            validate_images(document)
+            document = _validated_document(document)
             prepared.append((uid(), uid(), document, checksum(document)))
         return prepared
 
@@ -927,6 +963,7 @@ class Store:
         return {"project": project, "assets": assets}
 
     def restore_project(self, name: str, config: CheckConfig, documents: list[Document]):
+        name = ProjectCreate(name=name).name
         prepared = self._prepare_project_documents(documents)
         with self.connection() as conn:
             self._begin_immediate(conn)
@@ -958,6 +995,7 @@ class Store:
     def restore_project_once(self, name: str, config: CheckConfig, documents: list[Document], request_key: str, fingerprint: str):
         """Commit a new project, all initial assets/versions and its receipt atomically."""
         self._validate_import_key(request_key, fingerprint)
+        name = ProjectCreate(name=name).name
         prepared = self._prepare_project_documents(documents)
         with self.connection() as conn:
             self._begin_immediate(conn)
@@ -983,7 +1021,7 @@ class Store:
         raise Conflict("素材名称冲突，请先重命名已有素材")
 
     def copy_asset(self, project_id: str, document: Document, source_asset_id: str | None = None, source_version_id: str | None = None):
-        validate_images(document)
+        document = _validated_document(document)
         digest = checksum(document)
         asset_id, version_id = uid(), uid()
         with self.connection() as conn:
@@ -995,15 +1033,14 @@ class Store:
             provenance = dict(copied.provenance)
             provenance["copiedFrom"] = {"assetId": source_asset_id, "versionId": source_version_id}
             copied.provenance = provenance
+            copied = _validated_document(copied)
             digest = checksum(copied)
             conn.execute("INSERT INTO assets VALUES (?,?,?,?,?)", (asset_id, project_id, name, version_id, now()))
             conn.execute("INSERT INTO versions VALUES (?,?,?,?,?,?,?)", (version_id, asset_id, None, "copy", copied.model_dump_json(), digest, now()))
         return self.asset(asset_id)
 
     def rename(self, asset_id: str, expected: str, name: str):
-        name = name.strip()
-        if not name:
-            raise ValueError("素材名称不能为空")
+        name = RenameAssetRequest(expectedCurrentVersionId=expected, name=name).name
         with self.connection() as conn:
             self._begin_immediate(conn)
             row = conn.execute("SELECT project_id,current_version FROM assets WHERE id=?", (asset_id,)).fetchone()
@@ -1015,8 +1052,12 @@ class Store:
             if duplicate:
                 raise Conflict("当前项目已有同名素材")
             current = conn.execute("SELECT document,checksum FROM versions WHERE id=? AND asset_id=?", (expected, asset_id)).fetchone()
-            document = Document.model_validate_json(current["document"])
-            document.name = name
+            # Old MCP versions could persist an invalid name. Replace only
+            # that field before validating so a normal rename can recover it;
+            # every other document invariant must still hold.
+            payload = json.loads(current["document"])
+            payload["name"] = name
+            document = _validated_document(Document.model_validate(payload))
             digest = checksum(document)
             if digest != current["checksum"]:
                 version_id = uid()
@@ -1056,7 +1097,7 @@ class Store:
         return Document.model_validate_json(row["document"])
 
     def save(self, asset_id: str, expected: str, document: Document, operation: str = "edit"):
-        validate_images(document)
+        document = _validated_document(document)
         digest = checksum(document)
         version_id = uid()
         with self.connection() as conn:
@@ -1118,6 +1159,7 @@ class Store:
             return reports
 
     def preview(self, asset_id: str, base: str, document: Document, actions: list, config: dict):
+        document = _validated_document(document)
         preview_id = uid()
         digest = checksum(document)
         with self.connection() as conn:
@@ -1134,6 +1176,7 @@ class Store:
                 raise Conflict("确认版本与预览基础版本不一致")
             if row["result_version"]:
                 return row["result_version"], json.loads(row["config"])
+            _validated_document(Document.model_validate_json(row["document"]))
             current = conn.execute("SELECT current_version FROM assets WHERE id=?", (asset_id,)).fetchone()
             if current["current_version"] != expected:
                 raise Conflict("预览已过期，请基于当前版本重新预览")

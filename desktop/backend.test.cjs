@@ -57,3 +57,59 @@ test('desktop reuses its persisted backend port and starts safely if another ser
     await rm(dataRoot, { recursive: true, force: true });
   }
 });
+
+test('private backend shuts down when its owner pipe closes', { timeout: 20000 }, async () => {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'pixelart-desktop-owner-'));
+  let backend;
+  try {
+    backend = await startBackend({ root: path.resolve(__dirname, '..'), dataRoot });
+    const exited = new Promise(resolve => backend.child.once('exit', resolve));
+    backend.child.stdin.end();
+    await exited;
+    await assert.rejects(fetch(`${backend.url}/api/health`, { signal: AbortSignal.timeout(1000) }));
+  } finally {
+    await backend?.stop();
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test('killing the owner process cannot leave the private API listening', { timeout: 25000 }, async () => {
+  const { spawn } = require('node:child_process');
+  const { once } = require('node:events');
+  const { setTimeout: delay } = require('node:timers/promises');
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'pixelart-desktop-crash-'));
+  const owner = spawn(process.execPath, ['-e', `
+    const {startBackend} = require(process.argv[1]);
+    startBackend({root:process.argv[2], dataRoot:process.argv[3]}).then(backend => {
+      console.log(JSON.stringify({url:backend.url,pid:backend.child.pid}));
+    }).catch(error => {console.error(error);process.exit(1)});
+  `, path.resolve(__dirname, 'backend.cjs'), path.resolve(__dirname, '..'), dataRoot], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let backend;
+  try {
+    const line = await new Promise((resolve, reject) => {
+      let output = '';
+      owner.stdout.on('data', chunk => {
+        output += chunk;
+        if (output.includes('\n')) resolve(output.split('\n')[0]);
+      });
+      owner.once('error', reject);
+      owner.once('exit', () => reject(new Error('Owner exited before reporting its backend')));
+    });
+    backend = JSON.parse(line);
+    const exited = once(owner, 'exit');
+    owner.kill('SIGKILL');
+    await exited;
+    let listening = true;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { await fetch(`${backend.url}/api/health`, { signal: AbortSignal.timeout(1000) }); }
+      catch { listening = false; break; }
+      await delay(100);
+    }
+    assert.equal(listening, false, 'backend survived its owner');
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) owner.kill('SIGKILL');
+    // Only the process explicitly created by this test may be cleaned up.
+    if (backend) { try { process.kill(backend.pid, 'SIGKILL'); } catch {} }
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});

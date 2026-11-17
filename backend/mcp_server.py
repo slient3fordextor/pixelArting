@@ -48,9 +48,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 from urllib.parse import urlsplit
 from .mcp_contract import CONTRACT_VERSION, SERVICE_VERSION, Capabilities, ExportDescriptor, ToolFailure, error_result
 from .mcp_asset_contract import (
-    ActionsInput, AssetOutput, AssetSummary, CommitOutput, ConfigInput, ConfigOutput,
+    ActionsInput, AssetNameInput, AssetOutput, AssetSummary, CommitOutput, ConfigInput, ConfigOutput,
     DocumentInput, DocumentOutput, HealthOutput, InspectionOutput, PreviewOutput,
-    ProjectInfo, ProjectOutput, ReportOutput, SaveOutput, WireObject,
+    ProjectInfo, ProjectNameInput, ProjectOutput, ReportOutput, SaveOutput, WireObject,
 )
 
 
@@ -527,18 +527,20 @@ def create_mcp_server(
 
     @mcp.tool(annotations=WRITE)
     @idempotent_write(workspace, _require_writes)
-    def update_project_config(project_id: str, config: ConfigInput, idempotency_key: OptionalIdempotencyKey = None) -> ConfigOutput:
-        """Replace a project's quality-check configuration. Requires write access."""
+    def update_project_config(project_id: str, config: ConfigInput, idempotency_key: OptionalIdempotencyKey = None, expected_config: ConfigInput | None = None) -> ConfigOutput:
+        """Replace project quality settings. Pass the last get_project_config result as expected_config to reject concurrent changes."""
         try:
             _require_writes()
-            return workspace().save_project_config(project_id, CheckConfig.model_validate(config)).model_dump()
+            store = workspace()
+            expected_hash = store.config_hash(CheckConfig.model_validate(expected_config)) if expected_config is not None else None
+            return store.save_project_config(project_id, CheckConfig.model_validate(config), expected_hash).model_dump()
         except Exception as error:
             return _error(error)
 
 
     @mcp.tool(annotations=WRITE)
     @idempotent_write(workspace, _require_writes)
-    def create_project(name: str, idempotency_key: OptionalIdempotencyKey = None) -> ProjectOutput:
+    def create_project(name: ProjectNameInput, idempotency_key: OptionalIdempotencyKey = None) -> ProjectOutput:
         """Create a project. Requires local write access granted at startup."""
         try:
             _require_writes()
@@ -594,7 +596,7 @@ def create_mcp_server(
 
     @mcp.tool(annotations=WRITE)
     @idempotent_write(workspace, _require_writes)
-    def rename_asset(asset_id: str, expected_current_version_id: str, name: str, idempotency_key: OptionalIdempotencyKey = None) -> AssetOutput:
+    def rename_asset(asset_id: str, expected_current_version_id: str, name: AssetNameInput, idempotency_key: OptionalIdempotencyKey = None) -> AssetOutput:
         """Rename an asset with optimistic version checking. Requires write access."""
         try:
             _require_writes()

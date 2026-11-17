@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -166,11 +166,16 @@ def create_app(data_root: Path | None = None):
         return generations.cancel(generation_id)
 
     @app.post("/api/ai/generations/{generation_id}/retry", status_code=202)
-    def retry_ai_generation(generation_id: str):
-        generation = store.generation(generation_id)
-        if generation.status in {"queued", "running"}:
-            raise Conflict("任务仍在执行，无法重试")
-        return create_ai_generation(generation.request)
+    def retry_ai_generation(generation_id: str, idempotency_key: str | None = Header(default=None)):
+        # Legacy desktop clients send no key. One retry per original task is
+        # stable across a lost response; a failed retry can itself be retried.
+        request_key = idempotency_key if idempotency_key is not None else f"desktop-retry:{generation_id}"
+        try:
+            return generations.retry(generation_id, request_key)
+        except GenerationNotConfigured as error:
+            raise HTTPException(409, str(error)) from error
+        except GenerationQueueFull as error:
+            raise HTTPException(429, str(error)) from error
 
     @app.get("/api/ai/generations/{generation_id}/candidates/{candidate_id}/source")
     def ai_candidate_source(generation_id: str, candidate_id: str):
@@ -221,12 +226,22 @@ def create_app(data_root: Path | None = None):
         return {"deleted": True, "projectId": project_id}
 
     @app.get("/api/projects/{project_id}/check-config")
-    def project_config(project_id: str):
-        return store.project_config(project_id)
+    def project_config(project_id: str, response: Response):
+        config, config_hash = store.project_config_snapshot(project_id)
+        response.headers["ETag"] = f'"{config_hash}"'
+        return config
 
     @app.put("/api/projects/{project_id}/check-config")
-    def save_project_config(project_id: str, body: CheckConfig):
-        return store.save_project_config(project_id, body)
+    def save_project_config(project_id: str, body: CheckConfig, response: Response, if_match: str | None = Header(default=None)):
+        expected_hash = None
+        if if_match is not None:
+            match = re.fullmatch(r'"([0-9a-f]{64})"', if_match)
+            if match is None:
+                raise ValueError("If-Match 必须是项目配置返回的 ETag")
+            expected_hash = match.group(1)
+        config = store.save_project_config(project_id, body, expected_config_hash=expected_hash)
+        response.headers["ETag"] = f'"{store.config_hash(config)}"'
+        return config
 
     @app.post("/api/demo")
     def demo():

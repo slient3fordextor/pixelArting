@@ -232,7 +232,7 @@ class GenerationService:
                 return
             if config.apiKey and contains_sensitive_string(result, config.apiKey):
                 raise AiProviderError('AI 服务结果包含敏感信息，已拒绝保存')
-            result = prepare_candidates(result, task.request, self.store.root, config.requestTimeoutSeconds, cancel_event)
+            result = prepare_candidates(result, task.request, self.store.root, config.requestTimeoutSeconds, cancel_event, provider_base_url=config.baseUrl)
             if not cancel_event.is_set():
                 self.store.update_generation(generation_id, 'succeeded', result=result)
         except AiProviderError as error:

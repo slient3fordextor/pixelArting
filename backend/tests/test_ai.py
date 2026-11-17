@@ -611,6 +611,7 @@ def test_fully_transparent_and_opaque_images_have_expected_background():
 
 
 def test_downloaded_candidate_does_not_receive_authorization(monkeypatch):
+    monkeypatch.setattr("backend.ai_candidates.socket.getaddrinfo", lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))])
     original_client = httpx.Client
     requests = []
 
@@ -625,6 +626,7 @@ def test_downloaded_candidate_does_not_receive_authorization(monkeypatch):
 
 
 def test_downloaded_candidate_rejects_redirects(monkeypatch):
+    monkeypatch.setattr("backend.ai_candidates.socket.getaddrinfo", lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))])
     original_client = httpx.Client
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=httpx.MockTransport(lambda request: httpx.Response(302, headers={"Location": "http://internal.example"})), **kwargs))
     with pytest.raises(AiProviderError, match="重定向"):

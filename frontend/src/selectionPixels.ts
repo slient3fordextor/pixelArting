@@ -29,3 +29,16 @@ export function resizeSelectionPixels(source: ImageData, width: number, height: 
   }
   return result;
 }
+
+// A selection carries its coverage independently of alpha: a selected transparent
+// pixel still replaces its destination, while holes in a mask leave it untouched.
+export type SelectionPixels = { image: ImageData; mask: Uint8Array | null };
+
+export function mapSelectionPixels(source: SelectionPixels, map: (image: ImageData) => ImageData): SelectionPixels {
+  const image = map(source.image);
+  if (!source.mask) return { image, mask: null };
+  const coverage = new ImageData(source.image.width, source.image.height);
+  source.mask.forEach((selected, index) => { coverage.data[index * 4 + 3] = selected ? 255 : 0; });
+  const mapped = map(coverage);
+  return { image, mask: Uint8Array.from({ length: image.width * image.height }, (_, index) => mapped.data[index * 4 + 3] ? 1 : 0) };
+}

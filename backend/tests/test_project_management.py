@@ -146,7 +146,7 @@ def test_delete_conflicts_preserve_the_complete_database(client, conflict):
 
 
 @pytest.mark.parametrize("body", [
-    {}, {"expectedName": "Project"}, {"expectedName": "", "expectedCurrentVersions": {}},
+    {}, {"expectedName": "Project"},
     {"expectedName": "Project", "expectedCurrentVersions": None}, {"expectedName": "Project", "expectedCurrentVersions": []},
     {"expectedName": "Project", "expectedCurrentVersions": {"asset": None}},
 ])
